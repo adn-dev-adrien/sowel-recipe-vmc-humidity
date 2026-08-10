@@ -288,7 +288,7 @@ function buildSlots(): RecipeSlotDef[] {
     },
     {
       id: "twoSpeed",
-      name: "Two-speed unit",
+      name: "Two speeds",
       description: "Adds a high speed",
       type: "select",
       required: false,
@@ -311,7 +311,7 @@ function buildSlots(): RecipeSlotDef[] {
     },
     {
       id: "alwaysOn",
-      name: "Low speed always on",
+      name: "Low speed on",
       description: "Only the high speed is driven",
       type: "select",
       required: false,
@@ -327,7 +327,7 @@ function buildSlots(): RecipeSlotDef[] {
     // ── Thresholds ────────────────────────────────────────────
     {
       id: "humidityMax",
-      name: "Maximum humidity",
+      name: "Max humidity",
       description: "Starts above (%)",
       type: "number",
       required: false,
@@ -337,7 +337,7 @@ function buildSlots(): RecipeSlotDef[] {
     },
     {
       id: "humidityMin",
-      name: "Target humidity",
+      name: "Target",
       description: "Stops below (%)",
       type: "number",
       required: false,
@@ -347,7 +347,7 @@ function buildSlots(): RecipeSlotDef[] {
     },
     {
       id: "boostDelta",
-      name: "High-speed margin",
+      name: "Boost margin",
       description: "Points above the maximum",
       type: "number",
       required: false,
@@ -409,7 +409,7 @@ function buildSlots(): RecipeSlotDef[] {
     },
     {
       id: "motionMaxRun",
-      name: "Occupancy maximum",
+      name: "Presence max",
       description: "Then a 30 min pause",
       type: "duration",
       required: false,
@@ -471,7 +471,7 @@ function buildSlots(): RecipeSlotDef[] {
     },
     {
       id: "quietScope",
-      name: "Quiet applies to",
+      name: "Quiet scope",
       description: "All, or humidity only",
       type: "select",
       required: false,
@@ -500,20 +500,20 @@ const I18N_FR: RecipeLangPack = {
 
     vmc: { name: "VMC", description: "Équipement on/off à piloter" },
     twoSpeed: {
-      name: "VMC 2 vitesses",
+      name: "2 vitesses",
       description: "Ajoute une grande vitesse",
       options: { off: "Non", on: "Oui" },
     },
     vmcBoost: { name: "Grande vitesse", description: "Équipement de la 2ᵉ vitesse" },
     alwaysOn: {
-      name: "Petite vitesse permanente",
-      description: "Seule la grande vitesse est pilotée",
+      name: "PV permanente",
+      description: "Seule la grande vitesse tourne",
       options: { off: "Non", on: "Oui" },
     },
 
     humidityMax: { name: "Humidité maxi", description: "Démarrage au-dessus (%)" },
-    humidityMin: { name: "Humidité cible", description: "Arrêt en dessous (%)" },
-    boostDelta: { name: "Marge grande vitesse", description: "Points au-dessus du maxi" },
+    humidityMin: { name: "Cible", description: "Arrêt en dessous (%)" },
+    boostDelta: { name: "Marge boost", description: "Points au-dessus du maxi" },
 
     outdoorSensor: { name: "Capteur extérieur", description: "Humidité, idéalement température" },
     outdoorMargin: { name: "Marge d'assèchement", description: "Gain minimal utile (points)" },
@@ -521,19 +521,19 @@ const I18N_FR: RecipeLangPack = {
     motionSensors: { name: "Détecteurs", description: "Extraction sur passage aux WC" },
     motionConfirm: { name: "Confirmation", description: "Mouvement soutenu avant départ" },
     motionRunAfter: { name: "Prolongation", description: "Après la dernière détection" },
-    motionMaxRun: { name: "Durée maxi présence", description: "Puis pause de 30 min" },
+    motionMaxRun: { name: "Maxi présence", description: "Puis pause de 30 min" },
 
     minRun: { name: "Marche mini", description: "Anti court-cycle" },
     maxRun: { name: "Marche maxi", description: "Arrêt forcé, puis 1 h de repos" },
     quietMode: {
-      name: "Plage silencieuse",
+      name: "Silence",
       description: "Interdit la VMC la nuit",
       options: { off: "Non", on: "Oui" },
     },
     quietStart: { name: "Silence de", description: "Début de la plage" },
     quietEnd: { name: "Silence à", description: "Fin de la plage" },
     quietScope: {
-      name: "Portée du silence",
+      name: "Portée",
       description: "Tout, ou humidité seulement",
       options: { all: "Tout", humidity: "Humidité seulement" },
     },

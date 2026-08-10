@@ -823,6 +823,21 @@ describe("form shape", () => {
     expect(createRecipe().slots.filter((s) => s.type === "boolean")).toEqual([]);
   });
 
+  it("keeps labels short enough not to wrap in a three-column row", () => {
+    // A group of three renders in ~120 px cells: a label that wraps pushes its
+    // field down and the row stops lining up. Groups that never exceed two
+    // columns get twice the width.
+    const THREE_COL_GROUPS = new Set(["thresholds", "motion", "limits"]);
+    const r = createRecipe();
+    for (const slot of r.slots) {
+      if (!slot.group || slot.list) continue;
+      const budget = THREE_COL_GROUPS.has(slot.group) ? 14 : 20;
+      expect(slot.name.length, `${slot.id} EN "${slot.name}"`).toBeLessThanOrEqual(budget);
+      const fr = r.i18n?.fr.slots?.[slot.id];
+      expect(fr!.name.length, `${slot.id} FR "${fr!.name}"`).toBeLessThanOrEqual(budget);
+    }
+  });
+
   it("keeps field help short enough to stay readable", () => {
     for (const slot of createRecipe().slots) {
       expect(slot.description.length, `${slot.id} EN`).toBeLessThanOrEqual(40);
