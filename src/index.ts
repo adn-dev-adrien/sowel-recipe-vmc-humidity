@@ -261,17 +261,6 @@ export function isTwoSpeed(params: Record<string, unknown>): boolean {
 function buildSlots(): RecipeSlotDef[] {
   return [
     { id: "zone", name: "Zone", description: "Zone of the ventilation", type: "zone", required: true },
-    {
-      id: "sensors",
-      name: "Humidity sensors",
-      description: "Rooms the ventilation serves",
-      type: "equipment",
-      required: true,
-      list: true,
-      constraints: { equipmentType: SENSOR_TYPES, crossZone: true, includeDescendants: true },
-      group: "sensors",
-    },
-
     // ── Ventilation ───────────────────────────────────────────
     // Slot counts per group are deliberate: the recipe form lays a group out
     // as `n <= 3 ? n : 2` columns, so a group must show 2, 3, 4 or 6 fields to
@@ -322,6 +311,17 @@ function buildSlots(): RecipeSlotDef[] {
       ],
       hiddenWhen: { slot: "twoSpeed", equals: "off" },
       group: "vmc",
+    },
+
+    {
+      id: "sensors",
+      name: "Humidity sensors",
+      description: "Rooms the ventilation serves",
+      type: "equipment",
+      required: true,
+      list: true,
+      constraints: { equipmentType: SENSOR_TYPES, crossZone: true, includeDescendants: true },
+      group: "sensors",
     },
 
     // ── Thresholds ────────────────────────────────────────────

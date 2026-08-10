@@ -819,6 +819,14 @@ describe("form shape", () => {
     }
   });
 
+  it("asks for the ventilation before the rooms it watches", () => {
+    const groups = createRecipe()
+      .slots.filter((s) => s.group)
+      .map((s) => s.group);
+    expect(groups[0]).toBe("vmc");
+    expect(groups.indexOf("vmc")).toBeLessThan(groups.indexOf("sensors"));
+  });
+
   it("uses select rather than boolean — the grouped form has no checkbox", () => {
     expect(createRecipe().slots.filter((s) => s.type === "boolean")).toEqual([]);
   });
