@@ -316,11 +316,31 @@ describe("validate", () => {
     ).toThrow(/shorter/i);
   });
 
-  it("rejects permanent low speed on a single-speed unit", () => {
-    const { ctx } = makeCtx();
+  it("ignores flags left behind by a hidden field", () => {
+    // The form hides a slot but keeps its value: turning the two-speed flag
+    // back off leaves alwaysOn — and possibly a boost equipment — set. Neither
+    // may block the save.
+    const { ctx } = makeCtx({ withBoost: true });
     expect(() =>
-      createRecipe().validate({ ...baseParams, alwaysOn: "on" }, ctx as never),
-    ).toThrow(/two-speed/i);
+      createRecipe().validate(
+        { ...baseParams, twoSpeed: "off", alwaysOn: "on", vmcBoost: "boost-1" },
+        ctx as never,
+      ),
+    ).not.toThrow();
+  });
+
+  it("drives nothing but the main ventilation once two-speed is turned off", () => {
+    const h = makeCtx({
+      withBoost: true,
+      rooms: [{ id: "room-1", name: "SDB", humidity: 70, temperature: 21 }],
+    });
+    const inst = createRecipe().createInstance(
+      { ...baseParams, twoSpeed: "off", alwaysOn: "on", vmcBoost: "boost-1" },
+      h.ctx as never,
+    );
+    expect(vmcOrders(h.orders)).toEqual([true]);
+    expect(boostOrders(h.orders)).toEqual([]); // the stale boost stays untouched
+    inst.stop();
   });
 
   it("rejects a two-speed unit with no high-speed equipment", () => {

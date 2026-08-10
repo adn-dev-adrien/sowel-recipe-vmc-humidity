@@ -664,11 +664,12 @@ export function createRecipe(): RecipeDefinition {
         if (boostId === params.vmc) {
           throw new Error("High-speed equipment must differ from the ventilation equipment");
         }
-      } else if (flagOn(params.alwaysOn)) {
-        throw new Error(
-          "Permanent low speed requires a two-speed unit — otherwise the recipe has nothing to drive",
-        );
       }
+      // `alwaysOn` is deliberately NOT checked here. The form hides a slot but
+      // keeps its value, so switching back to a single-speed unit leaves
+      // "permanent low speed" set to yes behind the scenes. A hidden field
+      // must never be able to block a save: the value is simply ignored,
+      // exactly as createInstance ignores it without a high-speed equipment.
 
       if (typeof params.outdoorSensor === "string" && params.outdoorSensor) {
         const outEq = ctx.equipmentManager.getByIdWithDetails(params.outdoorSensor);
