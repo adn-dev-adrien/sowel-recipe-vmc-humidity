@@ -838,11 +838,22 @@ describe("form shape", () => {
     }
   });
 
-  it("keeps field help short enough to stay readable", () => {
-    for (const slot of createRecipe().slots) {
-      expect(slot.description.length, `${slot.id} EN`).toBeLessThanOrEqual(40);
-      const fr = createRecipe().i18n?.fr.slots?.[slot.id];
-      expect(fr!.description.length, `${slot.id} FR`).toBeLessThanOrEqual(40);
+  it("keeps the help under a field on one line", () => {
+    // The help sits under its field in the same cell: ~20 characters fit on a
+    // line in a three-column row, ~30 in a two-column one. Beyond that it
+    // wraps and the group turns into a wall of grey text.
+    const THREE_COL_GROUPS = new Set(["thresholds", "motion", "limits"]);
+    const r = createRecipe();
+    for (const slot of r.slots) {
+      if (!slot.group) continue;
+      const budget = slot.list ? 40 : THREE_COL_GROUPS.has(slot.group) ? 20 : 30;
+      expect(slot.description.length, `${slot.id} EN "${slot.description}"`).toBeLessThanOrEqual(
+        budget,
+      );
+      const fr = r.i18n?.fr.slots?.[slot.id];
+      expect(fr!.description.length, `${slot.id} FR "${fr!.description}"`).toBeLessThanOrEqual(
+        budget,
+      );
     }
   });
 });

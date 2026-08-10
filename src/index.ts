@@ -348,7 +348,7 @@ function buildSlots(): RecipeSlotDef[] {
     {
       id: "boostDelta",
       name: "Boost margin",
-      description: "Points above the maximum",
+      description: "Points over the max",
       type: "number",
       required: false,
       defaultValue: 5,
@@ -370,7 +370,7 @@ function buildSlots(): RecipeSlotDef[] {
     {
       id: "outdoorMargin",
       name: "Drying margin",
-      description: "Minimum gain to bother (points)",
+      description: "Minimum gain (points)",
       type: "number",
       required: false,
       defaultValue: 3,
@@ -392,7 +392,7 @@ function buildSlots(): RecipeSlotDef[] {
     {
       id: "motionConfirm",
       name: "Confirmation",
-      description: "Sustained motion before starting",
+      description: "Sustained motion",
       type: "duration",
       required: false,
       defaultValue: "1m",
@@ -401,7 +401,7 @@ function buildSlots(): RecipeSlotDef[] {
     {
       id: "motionRunAfter",
       name: "Extra run",
-      description: "After the last detection",
+      description: "After last detection",
       type: "duration",
       required: false,
       defaultValue: "15m",
@@ -430,7 +430,7 @@ function buildSlots(): RecipeSlotDef[] {
     {
       id: "maxRun",
       name: "Maximum run",
-      description: "Forced stop, then 1 h off",
+      description: "Forced stop, 1 h off",
       type: "duration",
       required: false,
       defaultValue: "3h",
@@ -472,7 +472,7 @@ function buildSlots(): RecipeSlotDef[] {
     {
       id: "quietScope",
       name: "Quiet scope",
-      description: "All, or humidity only",
+      description: "All or humidity",
       type: "select",
       required: false,
       defaultValue: "all",
@@ -511,30 +511,30 @@ const I18N_FR: RecipeLangPack = {
       options: { off: "Non", on: "Oui" },
     },
 
-    humidityMax: { name: "Humidité maxi", description: "Démarrage au-dessus (%)" },
-    humidityMin: { name: "Cible", description: "Arrêt en dessous (%)" },
-    boostDelta: { name: "Marge boost", description: "Points au-dessus du maxi" },
+    humidityMax: { name: "Humidité maxi", description: "Démarrage (%)" },
+    humidityMin: { name: "Cible", description: "Arrêt (%)" },
+    boostDelta: { name: "Marge boost", description: "Points au-dessus" },
 
-    outdoorSensor: { name: "Capteur extérieur", description: "Humidité, idéalement température" },
+    outdoorSensor: { name: "Capteur extérieur", description: "Humidité + température" },
     outdoorMargin: { name: "Marge d'assèchement", description: "Gain minimal utile (points)" },
 
     motionSensors: { name: "Détecteurs", description: "Extraction sur passage aux WC" },
-    motionConfirm: { name: "Confirmation", description: "Mouvement soutenu avant départ" },
-    motionRunAfter: { name: "Prolongation", description: "Après la dernière détection" },
-    motionMaxRun: { name: "Maxi présence", description: "Puis pause de 30 min" },
+    motionConfirm: { name: "Confirmation", description: "Mouvement soutenu" },
+    motionRunAfter: { name: "Prolongation", description: "Après la détection" },
+    motionMaxRun: { name: "Maxi présence", description: "Puis 30 min de pause" },
 
     minRun: { name: "Marche mini", description: "Anti court-cycle" },
-    maxRun: { name: "Marche maxi", description: "Arrêt forcé, puis 1 h de repos" },
+    maxRun: { name: "Marche maxi", description: "Arrêt forcé + repos" },
     quietMode: {
       name: "Silence",
-      description: "Interdit la VMC la nuit",
+      description: "Interdit la nuit",
       options: { off: "Non", on: "Oui" },
     },
     quietStart: { name: "Silence de", description: "Début de la plage" },
     quietEnd: { name: "Silence à", description: "Fin de la plage" },
     quietScope: {
       name: "Portée",
-      description: "Tout, ou humidité seulement",
+      description: "Tout ou humidité",
       options: { all: "Tout", humidity: "Humidité seulement" },
     },
   },
