@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   createRecipe,
+  flagOn,
+  isTwoSpeed,
   psat,
   ventilationFloor,
   hmToMinutes,
@@ -314,10 +316,17 @@ describe("validate", () => {
     ).toThrow(/shorter/i);
   });
 
-  it("rejects permanent low speed without a high-speed equipment", () => {
+  it("rejects permanent low speed on a single-speed unit", () => {
     const { ctx } = makeCtx();
     expect(() =>
-      createRecipe().validate({ ...baseParams, alwaysOn: true }, ctx as never),
+      createRecipe().validate({ ...baseParams, alwaysOn: "on" }, ctx as never),
+    ).toThrow(/two-speed/i);
+  });
+
+  it("rejects a two-speed unit with no high-speed equipment", () => {
+    const { ctx } = makeCtx();
+    expect(() =>
+      createRecipe().validate({ ...baseParams, twoSpeed: "on" }, ctx as never),
     ).toThrow(/high-speed/i);
   });
 
@@ -516,7 +525,7 @@ describe("two-speed ventilation", () => {
       rooms: [{ id: "room-1", name: "SDB", humidity: 70, temperature: 21 }],
     });
     const inst = createRecipe().createInstance(
-      { ...baseParams, vmcBoost: "boost-1", boostDelta: 5 },
+      { ...baseParams, twoSpeed: "on", vmcBoost: "boost-1", boostDelta: 5 },
       h.ctx as never,
     );
     expect(vmcOrders(h.orders)).toEqual([true]);
@@ -540,7 +549,7 @@ describe("two-speed ventilation", () => {
     // Default boostDelta (5): with a permanent low speed, extraction MUST mean
     // the high speed — otherwise a room at 62 % would trigger nothing at all.
     const inst = createRecipe().createInstance(
-      { ...baseParams, vmcBoost: "boost-1", alwaysOn: true },
+      { ...baseParams, twoSpeed: "on", vmcBoost: "boost-1", alwaysOn: "on" },
       h.ctx as never,
     );
     expect(vmcOrders(h.orders)).toEqual([true]); // asserted once at start
@@ -652,7 +661,7 @@ describe("occupancy (toilets)", () => {
   it("drives the high speed when the low speed is permanent", () => {
     const h = dryCtx({ withBoost: true });
     const inst = createRecipe().createInstance(
-      { ...motionParams, vmcBoost: "boost-1", alwaysOn: true },
+      { ...motionParams, twoSpeed: "on", vmcBoost: "boost-1", alwaysOn: "on" },
       h.ctx as never,
     );
     h.emit("wc-1", "motion", true);
@@ -739,6 +748,103 @@ describe("sensor robustness", () => {
     const inst = createRecipe().createInstance(baseParams, h.ctx as never);
     expect(() => h.emit("room-1", "humidity", "not-a-number")).not.toThrow();
     inst.stop();
+  });
+});
+
+// ============================================================
+// Form shape — what the recipe promises the UI
+// ============================================================
+
+/** Mirror of the core rule: a slot is hidden when the referenced sibling matches. */
+function isHidden(slot: any, params: Record<string, unknown>, all: any[]): boolean {
+  if (!slot.hiddenWhen) return false;
+  const ref = all.find((s) => s.id === slot.hiddenWhen.slot);
+  const value = params[slot.hiddenWhen.slot] ?? ref?.defaultValue;
+  const expected = Array.isArray(slot.hiddenWhen.equals)
+    ? slot.hiddenWhen.equals
+    : [slot.hiddenWhen.equals];
+  return expected.includes(value as string);
+}
+
+/** Compact fields the form lays out in a grid, per group. */
+function compactGroups(params: Record<string, unknown>): Record<string, string[]> {
+  const slots = createRecipe().slots;
+  const out: Record<string, string[]> = {};
+  for (const slot of slots) {
+    if (!slot.group) continue; // the zone slot is not a form field
+    if (slot.list) continue; // list slots render full width
+    if (isHidden(slot, params, slots)) continue;
+    (out[slot.group] ??= []).push(slot.id);
+  }
+  return out;
+}
+
+describe("form shape", () => {
+  it("hides every second-speed field on a single-speed unit", () => {
+    const shown = Object.values(compactGroups({})).flat();
+    expect(shown).not.toContain("vmcBoost");
+    expect(shown).not.toContain("alwaysOn");
+    expect(shown).not.toContain("boostDelta");
+    expect(shown).toContain("twoSpeed");
+  });
+
+  it("reveals them once the two-speed flag is set", () => {
+    const shown = Object.values(compactGroups({ twoSpeed: "on" })).flat();
+    expect(shown).toContain("vmcBoost");
+    expect(shown).toContain("alwaysOn");
+    expect(shown).toContain("boostDelta");
+  });
+
+  it("hides the quiet window until quiet hours are enabled", () => {
+    expect(Object.values(compactGroups({})).flat()).not.toContain("quietStart");
+    const on = Object.values(compactGroups({ quietMode: "on" })).flat();
+    expect(on).toEqual(expect.arrayContaining(["quietStart", "quietEnd", "quietScope"]));
+  });
+
+  it("keeps every group on a full grid row in every state", () => {
+    // The form lays a group out as `n <= 3 ? n : 2` columns, so 2, 3, 4 or 6
+    // visible fields fill their rows — 5 would leave a hole.
+    const states = [
+      {},
+      { twoSpeed: "on" },
+      { quietMode: "on" },
+      { twoSpeed: "on", quietMode: "on" },
+    ];
+    for (const params of states) {
+      for (const [group, ids] of Object.entries(compactGroups(params))) {
+        expect([2, 3, 4, 6], `${group} in ${JSON.stringify(params)} has ${ids.length}`).toContain(
+          ids.length,
+        );
+      }
+    }
+  });
+
+  it("uses select rather than boolean — the grouped form has no checkbox", () => {
+    expect(createRecipe().slots.filter((s) => s.type === "boolean")).toEqual([]);
+  });
+
+  it("keeps field help short enough to stay readable", () => {
+    for (const slot of createRecipe().slots) {
+      expect(slot.description.length, `${slot.id} EN`).toBeLessThanOrEqual(40);
+      const fr = createRecipe().i18n?.fr.slots?.[slot.id];
+      expect(fr!.description.length, `${slot.id} FR`).toBeLessThanOrEqual(40);
+    }
+  });
+});
+
+describe("flags", () => {
+  it("reads the select values and the booleans written before 0.3.0", () => {
+    expect(flagOn("on")).toBe(true);
+    expect(flagOn(true)).toBe(true);
+    expect(flagOn("off")).toBe(false);
+    expect(flagOn(false)).toBe(false);
+    expect(flagOn(undefined)).toBe(false);
+  });
+
+  it("infers two-speed from an instance created before the flag existed", () => {
+    expect(isTwoSpeed({ vmcBoost: "boost-1" })).toBe(true);
+    expect(isTwoSpeed({})).toBe(false);
+    expect(isTwoSpeed({ twoSpeed: "off", vmcBoost: "boost-1" })).toBe(false);
   });
 });
 

@@ -70,11 +70,12 @@ géré : la valeur est relue à chaque évaluation.
 | `zone`                          | —      | Zone de la VMC                                                       |
 | `sensors` (liste)               | —      | Sondes des pièces desservies (humidité obligatoire, température utile) |
 | `vmc`                           | —      | Équipement on/off (petite vitesse sur une 2 vitesses)                |
-| `vmcBoost`                      | vide   | Grande vitesse d'une VMC 2 vitesses                                  |
-| `alwaysOn`                      | non    | Petite vitesse permanente : seule la grande vitesse est pilotée      |
+| `twoSpeed`                      | Non    | VMC 2 vitesses : révèle les champs de la grande vitesse              |
+| `vmcBoost`                      | vide   | Équipement de la 2ᵉ vitesse (masqué si `twoSpeed` = Non)             |
+| `alwaysOn`                      | Non    | Petite vitesse permanente : seule la grande vitesse est pilotée      |
 | `humidityMax`                   | 60 %   | Seuil de démarrage                                                   |
 | `humidityMin`                   | 50 %   | Cible d'arrêt                                                        |
-| `boostDelta`                    | 5 pts  | Passage en grande vitesse au-delà de `humidityMax + boostDelta`      |
+| `boostDelta`                    | 5 pts  | Passage en grande vitesse au-delà de `humidityMax + boostDelta` (masqué si `twoSpeed` = Non) |
 | `outdoorSensor` / `outdoorMargin` | vide / 3 pts | Compensation extérieure                                     |
 | `minRun` / `maxRun`             | 15 min / 3 h | Anti court-cycle / arrêt forcé (+ 1 h de repos)                |
 | `quietMode` + `quietStart`/`quietEnd` | off / 22:00–07:00 | Plage silencieuse (aucun démarrage, cycle en cours coupé) |
@@ -99,6 +100,27 @@ géré : la valeur est relue à chaque évaluation.
 - État exposé (visible dans l'UI, exploitable par les modes) : `status`,
   `reason`, `running`, `motionRunning`, `vmcOn`, `boostOn`, `maxHumidity`,
   `maxHumidityRoom`, `outdoorFloor`.
+
+## Formulaire
+
+Par défaut la recette est mono-vitesse : un seul équipement marche/arrêt. Le
+drapeau **VMC 2 vitesses** fait apparaître les trois champs associés (grande
+vitesse, petite vitesse permanente, marge grande vitesse) ; sinon ils restent
+masqués. Idem pour la plage silencieuse, dont les heures n'apparaissent qu'une
+fois activée.
+
+Deux contraintes du formulaire de recette sont respectées par construction, et
+verrouillées par des tests :
+
+- la grille dispose un groupe en `n ≤ 3 ? n : 2` colonnes, donc chaque groupe
+  affiche 2, 3, 4 ou 6 champs dans **tous** les états — jamais 5, qui laisserait
+  un trou ;
+- la mise en page groupée n'a pas de rendu pour le type `boolean` (elle
+  retombe sur un champ texte affichant `false`), donc les drapeaux sont des
+  `select` Oui/Non.
+
+Les descriptions de champs sont limitées à 40 caractères : elles s'affichent
+sous chaque champ et un texte long rend le formulaire illisible.
 
 ## Développement
 

@@ -1,6 +1,6 @@
 {
   "name": "sowel-recipe-vmc-humidity",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Sowel recipe: humidity-driven ventilation (VMC) control with psychrometric outdoor compensation",
   "type": "module",
   "main": "dist/index.js",

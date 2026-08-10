@@ -236,62 +236,99 @@ export function isMotionDetected(value: unknown): boolean {
   return false;
 }
 
+/**
+ * Whether a flag param is on. Flags moved from `boolean` to `select` in 0.3.0
+ * (the grouped recipe form has no checkbox renderer and showed a raw "false"),
+ * so instances written before that still carry real booleans.
+ */
+export function flagOn(value: unknown): boolean {
+  return value === true || value === "on" || value === "true";
+}
+
+/**
+ * Two-speed mode. Instances predating the explicit flag are recognised by
+ * their high-speed equipment, so an existing configuration keeps working.
+ */
+export function isTwoSpeed(params: Record<string, unknown>): boolean {
+  if (params.twoSpeed !== undefined) return flagOn(params.twoSpeed);
+  return typeof params.vmcBoost === "string" && params.vmcBoost !== "";
+}
+
 // ============================================================
 // Slots
 // ============================================================
 
 function buildSlots(): RecipeSlotDef[] {
   return [
-    {
-      id: "zone",
-      name: "Zone",
-      description: "Zone the ventilation belongs to",
-      type: "zone",
-      required: true,
-    },
+    { id: "zone", name: "Zone", description: "Zone of the ventilation", type: "zone", required: true },
     {
       id: "sensors",
       name: "Humidity sensors",
-      description: "Sensors of the rooms served by the ventilation (each must report humidity)",
+      description: "Rooms the ventilation serves",
       type: "equipment",
       required: true,
       list: true,
       constraints: { equipmentType: SENSOR_TYPES, crossZone: true, includeDescendants: true },
       group: "sensors",
     },
+
+    // ── Ventilation ───────────────────────────────────────────
+    // Slot counts per group are deliberate: the recipe form lays a group out
+    // as `n <= 3 ? n : 2` columns, so a group must show 2, 3, 4 or 6 fields to
+    // fill its rows. Booleans are `select`s because the grouped layout has no
+    // checkbox renderer — it falls back to a text input showing "false".
     {
       id: "vmc",
       name: "Ventilation",
-      description: "On/off equipment driving the ventilation (low speed on a two-speed unit)",
+      description: "On/off equipment to drive",
       type: "equipment",
       required: true,
       constraints: { equipmentType: VMC_TYPES, crossZone: true },
       group: "vmc",
     },
     {
+      id: "twoSpeed",
+      name: "Two-speed unit",
+      description: "Adds a high speed",
+      type: "select",
+      required: false,
+      defaultValue: "off",
+      options: [
+        { value: "off", label: "No" },
+        { value: "on", label: "Yes" },
+      ],
+      group: "vmc",
+    },
+    {
       id: "vmcBoost",
       name: "High speed",
-      description:
-        "Second on/off equipment for the high speed of a two-speed unit. Leave empty for a single-speed ventilation.",
+      description: "Equipment of the second speed",
       type: "equipment",
       required: false,
       constraints: { equipmentType: VMC_TYPES, crossZone: true },
+      hiddenWhen: { slot: "twoSpeed", equals: "off" },
       group: "vmc",
     },
     {
       id: "alwaysOn",
-      name: "Permanent low speed",
-      description:
-        "The ventilation always runs at low speed: the recipe keeps it on and only drives the high speed. Requires a high-speed equipment.",
-      type: "boolean",
+      name: "Low speed always on",
+      description: "Only the high speed is driven",
+      type: "select",
       required: false,
-      defaultValue: false,
+      defaultValue: "off",
+      options: [
+        { value: "off", label: "No" },
+        { value: "on", label: "Yes" },
+      ],
+      hiddenWhen: { slot: "twoSpeed", equals: "off" },
       group: "vmc",
     },
+
+    // ── Thresholds ────────────────────────────────────────────
     {
       id: "humidityMax",
       name: "Maximum humidity",
-      description: "Above this level in any room, the ventilation starts (%)",
+      description: "Starts above (%)",
       type: "number",
       required: false,
       defaultValue: 60,
@@ -301,7 +338,7 @@ function buildSlots(): RecipeSlotDef[] {
     {
       id: "humidityMin",
       name: "Target humidity",
-      description: "The ventilation runs until every room is back under this level (%)",
+      description: "Stops below (%)",
       type: "number",
       required: false,
       defaultValue: 50,
@@ -311,42 +348,80 @@ function buildSlots(): RecipeSlotDef[] {
     {
       id: "boostDelta",
       name: "High-speed margin",
-      description:
-        "Switch to high speed when a room exceeds the maximum by this margin (%). Ignored without a high-speed equipment.",
+      description: "Points above the maximum",
       type: "number",
       required: false,
       defaultValue: 5,
       constraints: { min: 0, max: 30 },
+      hiddenWhen: { slot: "twoSpeed", equals: "off" },
       group: "thresholds",
     },
+
+    // ── Outdoor air ───────────────────────────────────────────
     {
       id: "outdoorSensor",
       name: "Outdoor sensor",
-      description:
-        "Equipment reporting outdoor humidity (and ideally outdoor temperature). Indoor humidity can never fall below what the outdoor air brings in.",
+      description: "Humidity, ideally temperature",
       type: "equipment",
       required: false,
-      constraints: {
-        equipmentType: ["weather", "sensor", "weather_forecast"],
-        crossZone: true,
-      },
+      constraints: { equipmentType: ["weather", "sensor", "weather_forecast"], crossZone: true },
       group: "outdoor",
     },
     {
       id: "outdoorMargin",
       name: "Drying margin",
-      description:
-        "Ventilating must gain at least this many points over the outdoor floor to be worth running (%)",
+      description: "Minimum gain to bother (points)",
       type: "number",
       required: false,
       defaultValue: 3,
       constraints: { min: 0, max: 15 },
       group: "outdoor",
     },
+
+    // ── Occupancy ─────────────────────────────────────────────
+    {
+      id: "motionSensors",
+      name: "Motion sensors",
+      description: "Ventilate the toilets on use",
+      type: "equipment",
+      required: false,
+      list: true,
+      constraints: { equipmentType: MOTION_TYPES, crossZone: true, includeDescendants: true },
+      group: "motion",
+    },
+    {
+      id: "motionConfirm",
+      name: "Confirmation",
+      description: "Sustained motion before starting",
+      type: "duration",
+      required: false,
+      defaultValue: "1m",
+      group: "motion",
+    },
+    {
+      id: "motionRunAfter",
+      name: "Extra run",
+      description: "After the last detection",
+      type: "duration",
+      required: false,
+      defaultValue: "15m",
+      group: "motion",
+    },
+    {
+      id: "motionMaxRun",
+      name: "Occupancy maximum",
+      description: "Then a 30 min pause",
+      type: "duration",
+      required: false,
+      defaultValue: "45m",
+      group: "motion",
+    },
+
+    // ── Guards ────────────────────────────────────────────────
     {
       id: "minRun",
-      name: "Minimum run time",
-      description: "Once started, the ventilation runs at least this long (anti short-cycling)",
+      name: "Minimum run",
+      description: "Anti short-cycling",
       type: "duration",
       required: false,
       defaultValue: "15m",
@@ -354,9 +429,8 @@ function buildSlots(): RecipeSlotDef[] {
     },
     {
       id: "maxRun",
-      name: "Maximum run time",
-      description:
-        "Forced stop after this duration even if humidity has not dropped (stuck sensor, open window), followed by a one-hour cooldown",
+      name: "Maximum run",
+      description: "Forced stop, then 1 h off",
       type: "duration",
       required: false,
       defaultValue: "3h",
@@ -365,20 +439,20 @@ function buildSlots(): RecipeSlotDef[] {
     {
       id: "quietMode",
       name: "Quiet hours",
-      description: "Block the ventilation during a nightly window",
+      description: "Nightly block",
       type: "select",
       required: false,
       defaultValue: "off",
       options: [
-        { value: "off", label: "Disabled" },
-        { value: "on", label: "Enabled" },
+        { value: "off", label: "No" },
+        { value: "on", label: "Yes" },
       ],
       group: "limits",
     },
     {
       id: "quietStart",
-      name: "Quiet start",
-      description: "Start of the quiet window",
+      name: "Quiet from",
+      description: "Start of the window",
       type: "time",
       required: false,
       defaultValue: "22:00",
@@ -387,8 +461,8 @@ function buildSlots(): RecipeSlotDef[] {
     },
     {
       id: "quietEnd",
-      name: "Quiet end",
-      description: "End of the quiet window",
+      name: "Quiet until",
+      description: "End of the window",
       type: "time",
       required: false,
       defaultValue: "07:00",
@@ -397,9 +471,8 @@ function buildSlots(): RecipeSlotDef[] {
     },
     {
       id: "quietScope",
-      name: "Quiet window applies to",
-      description:
-        "Whether the quiet window also blocks the occupancy-driven extraction (a night visit to the toilets)",
+      name: "Quiet applies to",
+      description: "All, or humidity only",
       type: "select",
       required: false,
       defaultValue: "all",
@@ -409,46 +482,6 @@ function buildSlots(): RecipeSlotDef[] {
       ],
       hiddenWhen: { slot: "quietMode", equals: "off" },
       group: "limits",
-    },
-    {
-      id: "motionSensors",
-      name: "Motion sensors",
-      description:
-        "Motion sensors of the rooms to ventilate on use (toilets). Extraction runs for the whole visit and keeps going afterwards.",
-      type: "equipment",
-      required: false,
-      list: true,
-      constraints: { equipmentType: MOTION_TYPES, crossZone: true, includeDescendants: true },
-      group: "motion",
-    },
-    {
-      id: "motionConfirm",
-      name: "Occupancy confirmation",
-      description:
-        "Motion must keep firing this long before the extraction starts — an isolated detection (open door, someone walking past) is ignored",
-      type: "duration",
-      required: false,
-      defaultValue: "1m",
-      group: "motion",
-    },
-    {
-      id: "motionRunAfter",
-      name: "Extraction after the visit",
-      description: "The extraction keeps running this long after the last detection",
-      type: "duration",
-      required: false,
-      defaultValue: "15m",
-      group: "motion",
-    },
-    {
-      id: "motionMaxRun",
-      name: "Occupancy maximum",
-      description:
-        "Cap for one occupancy-driven run. Beyond it the detections are treated as spurious (door left open) and the extraction pauses for 30 minutes.",
-      type: "duration",
-      required: false,
-      defaultValue: "45m",
-      group: "motion",
     },
   ];
 }
@@ -460,91 +493,49 @@ function buildSlots(): RecipeSlotDef[] {
 const I18N_FR: RecipeLangPack = {
   name: "VMC hygro-pilotée",
   description:
-    "Démarre la VMC quand une pièce supervisée dépasse l'humidité maximale et la maintient jusqu'à ce que toutes soient revenues sous la consigne. Tient compte de l'air extérieur : l'humidité extérieure est convertie à la température intérieure (formule de Magnus) pour connaître le plancher réellement atteignable — la VMC ne tourne jamais quand ventiler humidifierait au lieu d'assécher. Peut aussi déclencher l'extraction sur détection de présence (WC). À n'utiliser que seule sur une VMC : une autre recette pilotant le même équipement (ex. Programmation horaire) entrerait en conflit avec la plage silencieuse.",
+    "Démarre la VMC quand une pièce dépasse l'humidité maximale et la maintient jusqu'à ce que toutes soient sous la cible. Tient compte de l'air extérieur : ventiler n'assèche que si l'air du dehors, réchauffé à la température intérieure, est plus sec. Peut aussi extraire sur détection de présence (WC). À utiliser seule sur une VMC — une autre recette sur le même équipement entrerait en conflit.",
   slots: {
     zone: { name: "Zone", description: "Zone de la VMC" },
-    sensors: {
-      name: "Sondes d'humidité",
-      description:
-        "Capteurs des pièces desservies par la VMC (chacun doit remonter une humidité)",
+    sensors: { name: "Sondes d'humidité", description: "Pièces desservies par la VMC" },
+
+    vmc: { name: "VMC", description: "Équipement on/off à piloter" },
+    twoSpeed: {
+      name: "VMC 2 vitesses",
+      description: "Ajoute une grande vitesse",
+      options: { off: "Non", on: "Oui" },
     },
-    vmc: {
-      name: "VMC",
-      description: "Équipement on/off pilotant la VMC (petite vitesse sur une 2 vitesses)",
-    },
-    vmcBoost: {
-      name: "Grande vitesse",
-      description:
-        "Second équipement on/off pour la grande vitesse d'une VMC 2 vitesses. Laisser vide pour une VMC mono-vitesse.",
-    },
+    vmcBoost: { name: "Grande vitesse", description: "Équipement de la 2ᵉ vitesse" },
     alwaysOn: {
       name: "Petite vitesse permanente",
-      description:
-        "La VMC tourne en permanence en petite vitesse : la recette la maintient allumée et ne pilote que la grande vitesse. Nécessite un équipement grande vitesse.",
+      description: "Seule la grande vitesse est pilotée",
+      options: { off: "Non", on: "Oui" },
     },
-    humidityMax: {
-      name: "Humidité maximale",
-      description: "Au-dessus de ce taux dans une pièce, la VMC démarre (%)",
-    },
-    humidityMin: {
-      name: "Humidité cible",
-      description: "La VMC tourne jusqu'à ce que toutes les pièces repassent sous ce taux (%)",
-    },
-    boostDelta: {
-      name: "Marge grande vitesse",
-      description:
-        "Passe en grande vitesse quand une pièce dépasse le maximum de cette marge (%). Ignoré sans équipement grande vitesse.",
-    },
-    outdoorSensor: {
-      name: "Capteur extérieur",
-      description:
-        "Équipement remontant l'humidité extérieure (et idéalement la température extérieure). L'humidité intérieure ne peut jamais descendre sous ce que l'air extérieur apporte.",
-    },
-    outdoorMargin: {
-      name: "Marge d'assèchement",
-      description:
-        "Ventiler doit gagner au moins ce nombre de points sous le plancher extérieur pour valoir le coup (%)",
-    },
-    minRun: {
-      name: "Durée mini de marche",
-      description: "Une fois démarrée, la VMC tourne au moins ce temps (anti court-cycle)",
-    },
-    maxRun: {
-      name: "Durée maxi de marche",
-      description:
-        "Arrêt forcé après cette durée même si l'humidité n'est pas redescendue (sonde bloquée, fenêtre ouverte), suivi d'une heure de repos",
-    },
+
+    humidityMax: { name: "Humidité maxi", description: "Démarrage au-dessus (%)" },
+    humidityMin: { name: "Humidité cible", description: "Arrêt en dessous (%)" },
+    boostDelta: { name: "Marge grande vitesse", description: "Points au-dessus du maxi" },
+
+    outdoorSensor: { name: "Capteur extérieur", description: "Humidité, idéalement température" },
+    outdoorMargin: { name: "Marge d'assèchement", description: "Gain minimal utile (points)" },
+
+    motionSensors: { name: "Détecteurs", description: "Extraction sur passage aux WC" },
+    motionConfirm: { name: "Confirmation", description: "Mouvement soutenu avant départ" },
+    motionRunAfter: { name: "Prolongation", description: "Après la dernière détection" },
+    motionMaxRun: { name: "Durée maxi présence", description: "Puis pause de 30 min" },
+
+    minRun: { name: "Marche mini", description: "Anti court-cycle" },
+    maxRun: { name: "Marche maxi", description: "Arrêt forcé, puis 1 h de repos" },
     quietMode: {
       name: "Plage silencieuse",
-      description: "Interdit la VMC pendant une plage nocturne",
-      options: { off: "Désactivée", on: "Activée" },
+      description: "Interdit la VMC la nuit",
+      options: { off: "Non", on: "Oui" },
     },
-    quietStart: { name: "Début plage silencieuse", description: "Début de la plage silencieuse" },
-    quietEnd: { name: "Fin plage silencieuse", description: "Fin de la plage silencieuse" },
+    quietStart: { name: "Silence de", description: "Début de la plage" },
+    quietEnd: { name: "Silence à", description: "Fin de la plage" },
     quietScope: {
       name: "Portée du silence",
-      description:
-        "Si la plage silencieuse bloque aussi l'extraction sur détection de présence (passage nocturne aux WC)",
+      description: "Tout, ou humidité seulement",
       options: { all: "Tout", humidity: "Humidité seulement" },
-    },
-    motionSensors: {
-      name: "Détecteurs de mouvement",
-      description:
-        "Détecteurs des pièces à ventiler à l'usage (WC). L'extraction tourne pendant toute la présence puis se prolonge.",
-    },
-    motionConfirm: {
-      name: "Confirmation de présence",
-      description:
-        "Le mouvement doit se maintenir pendant cette durée avant de démarrer l'extraction — une détection isolée (porte ouverte, passage dans le couloir) est ignorée",
-    },
-    motionRunAfter: {
-      name: "Prolongation après le passage",
-      description: "L'extraction continue pendant cette durée après la dernière détection",
-    },
-    motionMaxRun: {
-      name: "Durée maxi sur présence",
-      description:
-        "Plafond d'un cycle sur détection. Au-delà, les détections sont considérées comme parasites (porte restée ouverte) et l'extraction se met en pause 30 minutes.",
     },
   },
   groups: {
@@ -552,7 +543,7 @@ const I18N_FR: RecipeLangPack = {
     vmc: "VMC",
     thresholds: "Seuils d'humidité",
     outdoor: "Air extérieur",
-    motion: "Détection de présence (WC)",
+    motion: "Présence (WC)",
     limits: "Garde-fous",
   },
 };
@@ -616,7 +607,7 @@ export function createRecipe(): RecipeDefinition {
     id: "vmc-humidity",
     name: "VMC Humidity Control",
     description:
-      "Starts the ventilation when a supervised room rises above the maximum humidity and keeps it running until every room is back under the target. Accounts for outdoor air: the outdoor humidity is converted to the indoor temperature (Magnus formula) to know the floor ventilation can actually reach — the VMC never runs when ventilating would add moisture instead of removing it. Optional motion sensors also trigger the extraction on use (toilets). Use it alone on a given ventilation: another recipe driving the same equipment (e.g. Schedule On/Off) would fight its quiet window.",
+      "Starts the ventilation when a room rises above the maximum humidity and keeps it running until every room is back under the target. Accounts for outdoor air: ventilating only dries when the outside air, warmed to the indoor temperature, is drier. Optional motion sensors also extract on use (toilets). Use it alone on a ventilation — another recipe on the same equipment would fight it.",
 
     slots: buildSlots(),
 
@@ -659,7 +650,11 @@ export function createRecipe(): RecipeDefinition {
         throw new Error(`Ventilation "${vmcEq.name}" exposes no on/off order`);
       }
 
-      const boostId = typeof params.vmcBoost === "string" ? params.vmcBoost : "";
+      const twoSpeed = isTwoSpeed(params);
+      const boostId = twoSpeed && typeof params.vmcBoost === "string" ? params.vmcBoost : "";
+      if (twoSpeed && !boostId) {
+        throw new Error("A two-speed unit needs its high-speed equipment");
+      }
       if (boostId) {
         const boostEq = ctx.equipmentManager.getByIdWithDetails(boostId);
         if (!boostEq) throw new Error("High-speed equipment not found");
@@ -669,9 +664,9 @@ export function createRecipe(): RecipeDefinition {
         if (boostId === params.vmc) {
           throw new Error("High-speed equipment must differ from the ventilation equipment");
         }
-      } else if (params.alwaysOn === true) {
+      } else if (flagOn(params.alwaysOn)) {
         throw new Error(
-          "Permanent low speed requires a high-speed equipment — otherwise the recipe has nothing to drive",
+          "Permanent low speed requires a two-speed unit — otherwise the recipe has nothing to drive",
         );
       }
 
@@ -747,8 +742,11 @@ export function createRecipe(): RecipeDefinition {
           ? [params.sensors]
           : [];
       const vmcId = params.vmc as string;
-      const boostId = typeof params.vmcBoost === "string" && params.vmcBoost ? params.vmcBoost : null;
-      const alwaysOn = params.alwaysOn === true && boostId !== null;
+      const boostId =
+        isTwoSpeed(params) && typeof params.vmcBoost === "string" && params.vmcBoost
+          ? params.vmcBoost
+          : null;
+      const alwaysOn = flagOn(params.alwaysOn) && boostId !== null;
       const humidityMax = Number(params.humidityMax ?? 60);
       const humidityMin = Number(params.humidityMin ?? 50);
       const boostDelta = Number(params.boostDelta ?? 5);
