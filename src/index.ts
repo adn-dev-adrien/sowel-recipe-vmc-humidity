@@ -856,8 +856,16 @@ export function createRecipe(): RecipeDefinition {
       let motionRunning = false; // occupancy-driven cycle
       let motionRunStartedAt = 0;
       let motionBlockedUntil = 0;
-      let mainOn: boolean | null = null; // last value we ordered (null = never)
-      let boostOn: boolean | null = null;
+      // Restored from the persisted state so a restart (recipe update, param
+      // edit) remembers what this recipe switched on — otherwise a VMC turned
+      // on by the previous run would never be turned off again. null = the
+      // recipe has never driven this output, so it must not force it off.
+      const restoreBool = (key: string): boolean | null => {
+        const v = ctx.state.get(key);
+        return typeof v === "boolean" ? v : null;
+      };
+      let mainOn: boolean | null = restoreBool("vmcOn");
+      let boostOn: boolean | null = restoreBool("boostOn");
       let highDemand = false; // high-speed hysteresis of the humidity cycle
       let stopped = false;
       const lastSeen = new Map<string, unknown>();

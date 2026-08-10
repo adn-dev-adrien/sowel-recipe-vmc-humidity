@@ -756,6 +756,22 @@ describe("lifecycle", () => {
     expect(h.orders.length).toBe(before); // no clock activity after stop
   });
 
+  it("does not touch a VMC it never switched on", () => {
+    const h = makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity: 45, temperature: 21 }] });
+    const inst = createRecipe().createInstance(baseParams, h.ctx as never);
+    expect(h.orders).toEqual([]); // no forced OFF at startup
+    inst.stop();
+  });
+
+  it("turns off a VMC it had switched on before a restart", () => {
+    // A previous run persisted its ownership; humidity has dropped since.
+    const h = makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity: 45, temperature: 21 }] });
+    h.state.set("vmcOn", true);
+    const inst = createRecipe().createInstance(baseParams, h.ctx as never);
+    expect(vmcOrders(h.orders)).toEqual([false]);
+    inst.stop();
+  });
+
   it("exposes the recipe metadata expected by the loader", () => {
     const r = createRecipe();
     expect(r.id).toBe("vmc-humidity");
