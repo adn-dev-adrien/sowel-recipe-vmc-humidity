@@ -155,9 +155,14 @@ const COOLDOWN_AFTER_MAX_RUN_MS = 60 * 60_000;
 const STALE_READING_MS = 60 * 60_000;
 /** Fallback indoor temperature when no probe reports one (only used for the floor). */
 const ASSUMED_INDOOR_TEMP = 20;
+/** Detections further apart than this belong to two different bursts (PIR blind time). */
+const MOTION_BURST_GAP_MS = 3 * 60_000;
+/** Pause after an occupancy run hit its cap — stray detections must not loop. */
+const MOTION_BLOCK_MS = 30 * 60_000;
 
 const SENSOR_TYPES = ["sensor", "weather", "thermostat", "heater", "camera"];
 const VMC_TYPES = ["switch", "appliance"];
+const MOTION_TYPES = ["sensor", "camera"];
 
 // ============================================================
 // Pure helpers (exported for tests)
@@ -215,6 +220,21 @@ export function inWindow(nowMin: number, startMin: number, endMin: number): bool
 }
 
 const round1 = (v: number): number => Math.round(v * 10) / 10;
+
+/**
+ * Whether a motion/occupancy reading means "someone is there". Integrations
+ * report booleans, strings ("ON", "true", "detected") or 0/1 depending on the
+ * device, and a momentary detector may re-send the same truthy value.
+ */
+export function isMotionDetected(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value > 0;
+  if (typeof value === "string") {
+    const s = value.trim().toLowerCase();
+    return s === "true" || s === "on" || s === "1" || s === "detected" || s === "occupied";
+  }
+  return false;
+}
 
 // ============================================================
 // Slots
@@ -375,6 +395,61 @@ function buildSlots(): RecipeSlotDef[] {
       hiddenWhen: { slot: "quietMode", equals: "off" },
       group: "limits",
     },
+    {
+      id: "quietScope",
+      name: "Quiet window applies to",
+      description:
+        "Whether the quiet window also blocks the occupancy-driven extraction (a night visit to the toilets)",
+      type: "select",
+      required: false,
+      defaultValue: "all",
+      options: [
+        { value: "all", label: "Everything" },
+        { value: "humidity", label: "Humidity only" },
+      ],
+      hiddenWhen: { slot: "quietMode", equals: "off" },
+      group: "limits",
+    },
+    {
+      id: "motionSensors",
+      name: "Motion sensors",
+      description:
+        "Motion sensors of the rooms to ventilate on use (toilets). Extraction runs for the whole visit and keeps going afterwards.",
+      type: "equipment",
+      required: false,
+      list: true,
+      constraints: { equipmentType: MOTION_TYPES, crossZone: true, includeDescendants: true },
+      group: "motion",
+    },
+    {
+      id: "motionConfirm",
+      name: "Occupancy confirmation",
+      description:
+        "Motion must keep firing this long before the extraction starts — an isolated detection (open door, someone walking past) is ignored",
+      type: "duration",
+      required: false,
+      defaultValue: "1m",
+      group: "motion",
+    },
+    {
+      id: "motionRunAfter",
+      name: "Extraction after the visit",
+      description: "The extraction keeps running this long after the last detection",
+      type: "duration",
+      required: false,
+      defaultValue: "15m",
+      group: "motion",
+    },
+    {
+      id: "motionMaxRun",
+      name: "Occupancy maximum",
+      description:
+        "Cap for one occupancy-driven run. Beyond it the detections are treated as spurious (door left open) and the extraction pauses for 30 minutes.",
+      type: "duration",
+      required: false,
+      defaultValue: "45m",
+      group: "motion",
+    },
   ];
 }
 
@@ -385,7 +460,7 @@ function buildSlots(): RecipeSlotDef[] {
 const I18N_FR: RecipeLangPack = {
   name: "VMC hygro-pilotée",
   description:
-    "Démarre la VMC quand une pièce supervisée dépasse l'humidité maximale et la maintient jusqu'à ce que toutes soient revenues sous la consigne. Tient compte de l'air extérieur : l'humidité extérieure est convertie à la température intérieure (formule de Magnus) pour connaître le plancher réellement atteignable — la VMC ne tourne jamais quand ventiler humidifierait au lieu d'assécher.",
+    "Démarre la VMC quand une pièce supervisée dépasse l'humidité maximale et la maintient jusqu'à ce que toutes soient revenues sous la consigne. Tient compte de l'air extérieur : l'humidité extérieure est convertie à la température intérieure (formule de Magnus) pour connaître le plancher réellement atteignable — la VMC ne tourne jamais quand ventiler humidifierait au lieu d'assécher. Peut aussi déclencher l'extraction sur détection de présence (WC). À n'utiliser que seule sur une VMC : une autre recette pilotant le même équipement (ex. Programmation horaire) entrerait en conflit avec la plage silencieuse.",
   slots: {
     zone: { name: "Zone", description: "Zone de la VMC" },
     sensors: {
@@ -446,12 +521,38 @@ const I18N_FR: RecipeLangPack = {
     },
     quietStart: { name: "Début plage silencieuse", description: "Début de la plage silencieuse" },
     quietEnd: { name: "Fin plage silencieuse", description: "Fin de la plage silencieuse" },
+    quietScope: {
+      name: "Portée du silence",
+      description:
+        "Si la plage silencieuse bloque aussi l'extraction sur détection de présence (passage nocturne aux WC)",
+      options: { all: "Tout", humidity: "Humidité seulement" },
+    },
+    motionSensors: {
+      name: "Détecteurs de mouvement",
+      description:
+        "Détecteurs des pièces à ventiler à l'usage (WC). L'extraction tourne pendant toute la présence puis se prolonge.",
+    },
+    motionConfirm: {
+      name: "Confirmation de présence",
+      description:
+        "Le mouvement doit se maintenir pendant cette durée avant de démarrer l'extraction — une détection isolée (porte ouverte, passage dans le couloir) est ignorée",
+    },
+    motionRunAfter: {
+      name: "Prolongation après le passage",
+      description: "L'extraction continue pendant cette durée après la dernière détection",
+    },
+    motionMaxRun: {
+      name: "Durée maxi sur présence",
+      description:
+        "Plafond d'un cycle sur détection. Au-delà, les détections sont considérées comme parasites (porte restée ouverte) et l'extraction se met en pause 30 minutes.",
+    },
   },
   groups: {
     sensors: "Pièces supervisées",
     vmc: "VMC",
     thresholds: "Seuils d'humidité",
     outdoor: "Air extérieur",
+    motion: "Détection de présence (WC)",
     limits: "Garde-fous",
   },
 };
@@ -515,7 +616,7 @@ export function createRecipe(): RecipeDefinition {
     id: "vmc-humidity",
     name: "VMC Humidity Control",
     description:
-      "Starts the ventilation when a supervised room rises above the maximum humidity and keeps it running until every room is back under the target. Accounts for outdoor air: the outdoor humidity is converted to the indoor temperature (Magnus formula) to know the floor ventilation can actually reach — the VMC never runs when ventilating would add moisture instead of removing it.",
+      "Starts the ventilation when a supervised room rises above the maximum humidity and keeps it running until every room is back under the target. Accounts for outdoor air: the outdoor humidity is converted to the indoor temperature (Magnus formula) to know the floor ventilation can actually reach — the VMC never runs when ventilating would add moisture instead of removing it. Optional motion sensors also trigger the extraction on use (toilets). Use it alone on a given ventilation: another recipe driving the same equipment (e.g. Schedule On/Off) would fight its quiet window.",
 
     slots: buildSlots(),
 
@@ -608,6 +709,30 @@ export function createRecipe(): RecipeDefinition {
           throw new Error("Quiet end must be HH:MM");
         }
       }
+
+      const motionIds = Array.isArray(params.motionSensors)
+        ? (params.motionSensors as unknown[]).filter((s): s is string => typeof s === "string")
+        : typeof params.motionSensors === "string" && params.motionSensors
+          ? [params.motionSensors]
+          : [];
+      for (const id of motionIds) {
+        const eq = ctx.equipmentManager.getByIdWithDetails(id);
+        if (!eq) throw new Error(`Motion equipment not found: ${id}`);
+        if (!findAlias(eq, ["motion", "camera_detection"], ["motion", "occupancy"])) {
+          throw new Error(`Sensor "${eq.name}" reports no motion`);
+        }
+      }
+      if (motionIds.length > 0) {
+        const confirm = ctx.helpers.parseDuration(params.motionConfirm ?? "1m");
+        const after = ctx.helpers.parseDuration(params.motionRunAfter ?? "15m");
+        const motionMax = ctx.helpers.parseDuration(params.motionMaxRun ?? "45m");
+        if (!(after > 0) || !(motionMax > 0)) {
+          throw new Error("Occupancy durations must be positive (e.g. 15m, 45m)");
+        }
+        if (confirm >= motionMax) {
+          throw new Error("Occupancy confirmation must be shorter than the occupancy maximum");
+        }
+      }
     },
 
     // ============================================================
@@ -637,6 +762,15 @@ export function createRecipe(): RecipeDefinition {
       const quietEnabled = params.quietMode === "on";
       const quietStartMin = hmToMinutes(String(params.quietStart ?? "22:00"));
       const quietEndMin = hmToMinutes(String(params.quietEnd ?? "07:00"));
+      const quietScope = params.quietScope === "humidity" ? "humidity" : "all";
+      const motionIds = Array.isArray(params.motionSensors)
+        ? (params.motionSensors as unknown[]).filter((s): s is string => typeof s === "string")
+        : typeof params.motionSensors === "string" && params.motionSensors
+          ? [params.motionSensors]
+          : [];
+      const motionConfirmMs = ctx.helpers.parseDuration(params.motionConfirm ?? "1m");
+      const motionRunAfterMs = ctx.helpers.parseDuration(params.motionRunAfter ?? "15m");
+      const motionMaxRunMs = ctx.helpers.parseDuration(params.motionMaxRun ?? "45m");
 
       // ── Resolve equipments and aliases once ─────────────────
       const vmcEq = ctx.equipmentManager.getByIdWithDetails(vmcId);
@@ -690,11 +824,41 @@ export function createRecipe(): RecipeDefinition {
       let outdoorHumidity = bindingValue(outdoorEq, outdoorHumAlias);
       let outdoorTemp = bindingValue(outdoorEq, outdoorTempAlias);
 
+      interface MotionSensor {
+        id: string;
+        name: string;
+        alias: string;
+        /** Start of the current burst of detections (null when idle). */
+        firstAt: number | null;
+        /** Last detection of the current burst. */
+        lastAt: number | null;
+      }
+
+      const motionSensors: MotionSensor[] = [];
+      for (const id of motionIds) {
+        const eq = ctx.equipmentManager.getByIdWithDetails(id);
+        if (!eq) {
+          ctx.log(`Détecteur introuvable (${id.slice(0, 8)}), ignoré`, "warn");
+          continue;
+        }
+        const alias = findAlias(eq, ["motion", "camera_detection"], ["motion", "occupancy"]);
+        if (!alias) {
+          ctx.log(`Détecteur "${eq.name}" sans donnée de mouvement, ignoré`, "warn");
+          continue;
+        }
+        motionSensors.push({ id, name: eq.name, alias, firstAt: null, lastAt: null });
+      }
+
       // ── Runtime state ───────────────────────────────────────
-      let running = false;
+      let running = false; // humidity-driven cycle
       let runStartedAt = 0;
       let blockedUntil = 0;
-      let boostOn = false;
+      let motionRunning = false; // occupancy-driven cycle
+      let motionRunStartedAt = 0;
+      let motionBlockedUntil = 0;
+      let mainOn: boolean | null = null; // last value we ordered (null = never)
+      let boostOn: boolean | null = null;
+      let highDemand = false; // high-speed hysteresis of the humidity cycle
       let stopped = false;
       const lastSeen = new Map<string, unknown>();
 
@@ -725,38 +889,44 @@ export function createRecipe(): RecipeDefinition {
           });
       };
 
+      // An instance is restarted on every recipe update or param edit. Coming
+      // up with nothing to do must stay silent: forcing an OFF at startup
+      // would fight whoever switched the VMC on by hand.
+      const setMain = (on: boolean, why: string) => {
+        if (mainOn === on) return;
+        const firstAssert = mainOn === null;
+        mainOn = on;
+        putState("vmcOn", on);
+        if (firstAssert && !on) return;
+        ctx.log(`VMC ${on ? "ON" : "OFF"} — ${why}`);
+        sendOrder(vmcId, vmcOrderAlias, on, "VMC");
+      };
+
       const setBoost = (on: boolean, why: string) => {
         if (!boostId || !boostOrderAlias || boostOn === on) return;
+        const firstAssert = boostOn === null;
         boostOn = on;
         putState("boostOn", on);
+        if (firstAssert && !on) return;
         ctx.log(`Grande vitesse ${on ? "ON" : "OFF"} — ${why}`);
         sendOrder(boostId, boostOrderAlias, on, "grande vitesse");
       };
 
-      const startRun = (why: string) => {
-        running = true;
-        runStartedAt = Date.now();
-        putState("running", true);
-        if (!alwaysOn) {
-          putState("vmcOn", true);
-          ctx.log(`VMC ON — ${why}`);
-          sendOrder(vmcId, vmcOrderAlias, true, "VMC");
-        } else {
-          ctx.log(`Extraction demandée — ${why}`);
+      /**
+       * Single place where the two cycles (humidity, occupancy) become orders.
+       *
+       * With a permanent low speed the main equipment is never switched off,
+       * so extraction can only mean the high speed — otherwise the recipe
+       * would "run" without changing anything.
+       */
+      const applyOutputs = (extraction: boolean, high: boolean, why: string) => {
+        if (alwaysOn) {
+          setMain(true, "petite vitesse permanente");
+          setBoost(extraction, why);
+          return;
         }
-      };
-
-      const stopRun = (why: string) => {
-        running = false;
-        setBoost(false, why);
-        putState("running", false);
-        if (!alwaysOn) {
-          putState("vmcOn", false);
-          ctx.log(`VMC OFF — ${why}`);
-          sendOrder(vmcId, vmcOrderAlias, false, "VMC");
-        } else {
-          ctx.log(`Extraction terminée — ${why}`);
-        }
+        setMain(extraction, why);
+        if (boostId) setBoost(extraction && high, why);
       };
 
       /**
@@ -790,6 +960,60 @@ export function createRecipe(): RecipeDefinition {
             if (t !== null) outdoorTemp = t;
           }
         }
+        // A PIR that holds `occupancy = true` emits no further event: read the
+        // level too, so an ongoing presence keeps refreshing the burst.
+        for (const m of motionSensors) {
+          const eq = ctx.equipmentManager.getByIdWithDetails(m.id);
+          if (!eq) continue;
+          const raw = eq.dataBindings.find((b) => b.alias === m.alias)?.value;
+          if (isMotionDetected(raw)) noteMotion(m, now);
+        }
+      };
+
+      /**
+       * Record a detection, growing the current burst or opening a new one.
+       *
+       * Bursts are what tells a real visit from a stray detection: someone in
+       * the room keeps the sensor firing, a passer-by seen through an open
+       * door produces one short burst and nothing more.
+       */
+      const noteMotion = (m: MotionSensor, now: number) => {
+        if (m.lastAt !== null && now - m.lastAt > MOTION_BURST_GAP_MS) {
+          m.firstAt = now; // the previous burst is over — this is a new one
+        } else if (m.firstAt === null) {
+          m.firstAt = now;
+        }
+        m.lastAt = now;
+      };
+
+      /** Occupancy is confirmed once a burst has lasted `motionConfirm`. */
+      const motionState = (now: number) => {
+        let lastAt = 0;
+        let confirmedBy: string | null = null;
+        for (const m of motionSensors) {
+          if (m.lastAt === null || m.firstAt === null) continue;
+          if (m.lastAt > lastAt) lastAt = m.lastAt;
+          if (m.lastAt - m.firstAt >= motionConfirmMs && now - m.lastAt <= motionRunAfterMs) {
+            confirmedBy = m.name;
+          }
+        }
+        return { lastAt, confirmedBy };
+      };
+
+      const fmt = (ms: number) => ctx.helpers.formatDuration(ms);
+
+      const startHumidityRun = (why: string) => {
+        running = true;
+        runStartedAt = Date.now();
+        putState("running", true);
+        ctx.log(`Extraction humidité — ${why}`);
+      };
+
+      const stopHumidityRun = (why: string) => {
+        running = false;
+        highDemand = false;
+        putState("running", false);
+        ctx.log(`Extraction humidité terminée — ${why}`);
       };
 
       // ── Core evaluation ─────────────────────────────────────
@@ -801,134 +1025,171 @@ export function createRecipe(): RecipeDefinition {
 
         refreshReadings(now);
 
+        const quiet = quietEnabled && inWindow(nowMin, quietStartMin, quietEndMin);
+
+        // ══ Occupancy cycle (toilets) ═════════════════════════
+        const { lastAt: lastMotionAt, confirmedBy } = motionState(now);
+        const quietBlocksMotion = quiet && quietScope === "all";
+
+        if (motionRunning) {
+          if (quietBlocksMotion) {
+            motionRunning = false;
+            ctx.log("Extraction occupation arrêtée — plage silencieuse");
+          } else if (now - motionRunStartedAt >= motionMaxRunMs) {
+            // Sustained detections for that long are not a toilet visit —
+            // most likely an open door watching a busy hallway.
+            motionRunning = false;
+            motionBlockedUntil = now + MOTION_BLOCK_MS;
+            ctx.log(
+              `Extraction occupation arrêtée — ${fmt(motionMaxRunMs)} de détections continues (porte ouverte ?), pause de ${fmt(MOTION_BLOCK_MS)}`,
+              "warn",
+            );
+          } else if (lastMotionAt === 0 || now - lastMotionAt > motionRunAfterMs) {
+            motionRunning = false;
+            ctx.log(`Extraction occupation terminée — ${fmt(motionRunAfterMs)} sans détection`);
+          }
+        } else if (!quietBlocksMotion && now >= motionBlockedUntil && confirmedBy !== null) {
+          motionRunning = true;
+          motionRunStartedAt = now;
+          ctx.log(`Occupation confirmée (${confirmedBy}) — extraction`);
+        }
+        putState("motionRunning", motionRunning);
+
+        // ══ Humidity cycle ════════════════════════════════════
+        let status = "idle";
+        let detail = "";
+
         const fresh = rooms.filter(
           (r) => r.humidity !== null && now - r.humidityAt <= STALE_READING_MS,
         );
 
-        // The maximum run time is a hard cap: it wins over every other rule,
-        // including the no-data path below (which would report a vaguer reason).
         if (running && now - runStartedAt >= maxRunMs) {
+          // The maximum run time is a hard cap: it outranks every other rule,
+          // including the no-data path below.
           blockedUntil = now + COOLDOWN_AFTER_MAX_RUN_MS;
-          stopRun(
-            `durée maxi atteinte (${ctx.helpers.formatDuration(maxRunMs)}), repos ${ctx.helpers.formatDuration(COOLDOWN_AFTER_MAX_RUN_MS)}`,
+          stopHumidityRun(
+            `durée maxi atteinte (${fmt(maxRunMs)}), repos ${fmt(COOLDOWN_AFTER_MAX_RUN_MS)}`,
           );
-          setStatus("cooldown", "Durée maximale atteinte, repos forcé");
-          return;
-        }
-
-        if (fresh.length === 0) {
+          status = "cooldown";
+          detail = "Durée maximale atteinte, repos forcé";
+        } else if (fresh.length === 0) {
           if (running && now - runStartedAt >= minRunMs) {
-            stopRun("aucune mesure d'humidité fraîche");
+            stopHumidityRun("aucune mesure d'humidité fraîche");
           }
-          setStatus("no_data", "Aucune sonde ne remonte d'humidité récente");
-          return;
-        }
+          status = "no_data";
+          detail = "Aucune sonde ne remonte d'humidité récente";
+        } else {
+          // Indoor reference temperature for the psychrometric conversion:
+          // the room's own probe when it has one, else the average of the
+          // others, else a conventional 20 °C.
+          const temps = fresh.map((r) => r.temperature).filter((t): t is number => t !== null);
+          const avgTemp =
+            temps.length > 0 ? temps.reduce((a, b) => a + b, 0) / temps.length : ASSUMED_INDOOR_TEMP;
 
-        // Indoor reference temperature for the psychrometric conversion:
-        // the room's own probe when it has one, else the average of the
-        // others, else a conventional 20 °C.
-        const temps = fresh.map((r) => r.temperature).filter((t): t is number => t !== null);
-        const avgTemp =
-          temps.length > 0 ? temps.reduce((a, b) => a + b, 0) / temps.length : ASSUMED_INDOOR_TEMP;
+          let worstName = "";
+          let worstHumidity = -Infinity;
+          let worstFloor: number | null = null;
+          let demand = false; // a room is above the max AND ventilating would dry it
+          let hold = false; // a room is above its effective target AND still gains
+          let boostDemand = false;
+          let boostHold = false;
+          let blockedByOutdoor = false;
 
-        let worstName = "";
-        let worstHumidity = -Infinity;
-        let worstFloor: number | null = null;
-        let demand = false; // a room is above the max AND ventilating would dry it
-        let hold = false; // a room is above its effective target AND ventilating still gains
-        let boostDemand = false;
-        let boostHold = false;
-        let blockedByOutdoor = false;
+          for (const r of fresh) {
+            const rh = r.humidity as number;
+            const tInt = r.temperature ?? avgTemp;
+            const floor = ventilationFloor(outdoorHumidity, outdoorTemp, tInt);
+            const effectiveMin =
+              floor === null ? humidityMin : Math.max(humidityMin, floor + outdoorMargin);
+            // Ventilation is only useful while the room sits above what the
+            // outdoor air can deliver, by at least the drying margin.
+            const useful = floor === null ? true : rh > floor + outdoorMargin;
 
-        for (const r of fresh) {
-          const rh = r.humidity as number;
-          const tInt = r.temperature ?? avgTemp;
-          const floor = ventilationFloor(outdoorHumidity, outdoorTemp, tInt);
-          const effectiveMin = floor === null ? humidityMin : Math.max(humidityMin, floor + outdoorMargin);
-          // Ventilation is only useful while the room sits above what the
-          // outdoor air can deliver, by at least the drying margin.
-          const useful = floor === null ? true : rh > floor + outdoorMargin;
-
-          if (rh > worstHumidity) {
-            worstHumidity = rh;
-            worstName = r.name;
-            worstFloor = floor;
-          }
-          if (!useful) {
-            if (rh >= humidityMax) blockedByOutdoor = true;
-            continue;
-          }
-          if (rh >= humidityMax) demand = true;
-          if (rh > effectiveMin) hold = true;
-          if (rh >= humidityMax + boostDelta) boostDemand = true;
-          if (rh >= humidityMax) boostHold = true;
-        }
-
-        putState("maxHumidity", round1(worstHumidity));
-        putState("maxHumidityRoom", worstName);
-        putState("outdoorFloor", worstFloor === null ? null : round1(worstFloor));
-
-        const quiet = quietEnabled && inWindow(nowMin, quietStartMin, quietEndMin);
-
-        if (running) {
-          const elapsed = now - runStartedAt;
-
-          // 1. Anti short-cycling: keep running, but the speed may still adapt.
-          // (The maximum run time is enforced earlier — it outranks everything.)
-          if (elapsed < minRunMs) {
-            if (boostDemand) setBoost(true, `${worstName} à ${round1(worstHumidity)} %`);
-            else if (!boostHold) setBoost(false, "humidité sous le maximum");
-            setStatus("running", `Durée mini en cours — ${worstName} à ${round1(worstHumidity)} %`);
-            return;
+            if (rh > worstHumidity) {
+              worstHumidity = rh;
+              worstName = r.name;
+              worstFloor = floor;
+            }
+            if (!useful) {
+              if (rh >= humidityMax) blockedByOutdoor = true;
+              continue;
+            }
+            if (rh >= humidityMax) demand = true;
+            if (rh > effectiveMin) hold = true;
+            if (rh >= humidityMax + boostDelta) boostDemand = true;
+            if (rh >= humidityMax) boostHold = true;
           }
 
-          // 3. Quiet hours cut the cycle short.
-          if (quiet) {
-            stopRun("plage silencieuse");
-            setStatus("quiet", "Plage silencieuse");
-            return;
+          putState("maxHumidity", round1(worstHumidity));
+          putState("maxHumidityRoom", worstName);
+          putState("outdoorFloor", worstFloor === null ? null : round1(worstFloor));
+
+          const worst = `${worstName} à ${round1(worstHumidity)} %`;
+          const floorText = worstFloor === null ? "?" : String(round1(worstFloor));
+
+          if (running) {
+            const elapsed = now - runStartedAt;
+            if (elapsed < minRunMs) {
+              // Anti short-cycling: keep running, but the speed may adapt.
+              status = "running";
+              detail = `Durée mini en cours — ${worst}`;
+            } else if (quiet) {
+              stopHumidityRun("plage silencieuse");
+              status = "quiet";
+              detail = "Plage silencieuse";
+            } else if (!hold) {
+              stopHumidityRun(
+                blockedByOutdoor
+                  ? `air extérieur trop humide (plancher ${floorText} %)`
+                  : `humidité redescendue (max ${round1(worstHumidity)} % sur ${worstName})`,
+              );
+              status = "idle";
+              detail = "Humidité sous la cible";
+            } else {
+              status = "running";
+              detail = `Extraction en cours — ${worst}`;
+            }
+          } else if (quiet) {
+            status = "quiet";
+            detail = "Plage silencieuse";
+          } else if (now < blockedUntil) {
+            status = "cooldown";
+            detail = "Repos après arrêt sur durée maximale";
+          } else if (demand) {
+            startHumidityRun(`${worst} (max ${humidityMax} %)`);
+            status = "running";
+            detail = `Extraction en cours — ${worst}`;
+          } else if (blockedByOutdoor) {
+            status = "blocked_outdoor";
+            detail = `Air extérieur trop humide pour assécher (plancher ${floorText} %)`;
+          } else {
+            status = "idle";
+            detail = `Humidité maxi ${round1(worstHumidity)} % sur ${worstName}`;
           }
 
-          // 4. Nothing left to gain → stop.
-          if (!hold) {
-            stopRun(
-              blockedByOutdoor
-                ? `air extérieur trop humide (plancher ${worstFloor === null ? "?" : round1(worstFloor)} %)`
-                : `humidité redescendue (max ${round1(worstHumidity)} % sur ${worstName})`,
-            );
-            setStatus("idle", "Humidité sous la cible");
-            return;
+          // High-speed hysteresis: engage above max + margin, release under
+          // the maximum. Only meaningful while the humidity cycle runs.
+          if (running) {
+            if (boostDemand) highDemand = true;
+            else if (!boostHold) highDemand = false;
           }
-
-          if (boostDemand) setBoost(true, `${worstName} à ${round1(worstHumidity)} %`);
-          else if (!boostHold) setBoost(false, "humidité sous le maximum");
-          setStatus("running", `Extraction en cours — ${worstName} à ${round1(worstHumidity)} %`);
-          return;
         }
 
-        // ── Idle ──────────────────────────────────────────────
-        if (quiet) {
-          setStatus("quiet", "Plage silencieuse");
-          return;
-        }
-        if (now < blockedUntil) {
-          setStatus("cooldown", "Repos après arrêt sur durée maximale");
-          return;
-        }
-        if (demand) {
-          startRun(`${worstName} à ${round1(worstHumidity)} % (max ${humidityMax} %)`);
-          if (boostDemand) setBoost(true, `${worstName} à ${round1(worstHumidity)} %`);
-          setStatus("running", `Extraction en cours — ${worstName} à ${round1(worstHumidity)} %`);
-          return;
-        }
-        if (blockedByOutdoor) {
+        // ══ Outputs ═══════════════════════════════════════════
+        const extraction = running || motionRunning;
+        const why = running ? detail : motionRunning ? "occupation détectée" : detail;
+        applyOutputs(extraction, highDemand, why);
+
+        if (motionRunning) {
           setStatus(
-            "blocked_outdoor",
-            `Air extérieur trop humide pour assécher (plancher ${worstFloor === null ? "?" : round1(worstFloor)} %)`,
+            running ? "running" : "motion",
+            running
+              ? `${detail} + occupation`
+              : `Occupation — extraction jusqu'à ${fmt(motionRunAfterMs)} sans détection`,
           );
-          return;
+        } else {
+          setStatus(status, detail);
         }
-        setStatus("idle", `Humidité maxi ${round1(worstHumidity)} % sur ${worstName}`);
       };
 
       // ── Subscriptions ───────────────────────────────────────
@@ -937,6 +1198,21 @@ export function createRecipe(): RecipeDefinition {
           const eqId = event.equipmentId as string;
           const alias = event.alias as string;
           const value = event.value;
+
+          // Motion first, and deliberately NOT de-duplicated: a momentary
+          // detector re-sends the same truthy value on every detection, and
+          // each one is what grows the burst.
+          let motionMatched = false;
+          for (const m of motionSensors) {
+            if (m.id !== eqId || m.alias !== alias) continue;
+            motionMatched = true;
+            if (isMotionDetected(value)) noteMotion(m, Date.now());
+          }
+          if (motionMatched) {
+            evaluate();
+            return;
+          }
+
           const key = `${eqId}:${alias}`;
           if (lastSeen.get(key) === value) return; // edge guard: events re-fire unchanged
           lastSeen.set(key, value);
@@ -979,22 +1255,32 @@ export function createRecipe(): RecipeDefinition {
         }
       }, CLOCK_MS);
 
-      // Permanent low speed: assert it once at start, never turn it off.
-      if (alwaysOn) {
-        putState("vmcOn", true);
-        sendOrder(vmcId, vmcOrderAlias, true, "petite vitesse permanente");
-      }
       putState("running", false);
-      putState("boostOn", false);
+      putState("motionRunning", false);
 
       ctx.log(
         `VMC hygro-pilotée démarrée (${rooms.length} pièce(s), max ${humidityMax} %, cible ${humidityMin} %` +
           (outdoorId ? `, compensation extérieure +${outdoorMargin} pts` : "") +
           (boostId ? ", 2 vitesses" : "") +
           (alwaysOn ? ", petite vitesse permanente" : "") +
-          (quietEnabled ? `, silence ${String(params.quietStart ?? "22:00")}–${String(params.quietEnd ?? "07:00")}` : "") +
+          (motionSensors.length > 0
+            ? `, ${motionSensors.length} détecteur(s) (confirmation ${fmt(motionConfirmMs)}, prolongation ${fmt(motionRunAfterMs)})`
+            : "") +
+          (quietEnabled
+            ? `, silence ${String(params.quietStart ?? "22:00")}–${String(params.quietEnd ?? "07:00")}${quietScope === "humidity" ? " (humidité seulement)" : ""}`
+            : "") +
           ")",
       );
+
+      if (quietEnabled) {
+        // Two recipes driving the same VMC each own the equipment: whichever
+        // acts last wins, and a schedule recipe will happily switch it back on
+        // inside this recipe's quiet window.
+        ctx.log(
+          "Plage silencieuse active : ne pas piloter cette VMC avec une autre recette (ex. Programmation horaire), les deux se contrediraient.",
+          "warn",
+        );
+      }
 
       evaluate();
 

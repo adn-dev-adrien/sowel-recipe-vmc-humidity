@@ -6,6 +6,7 @@ import {
   hmToMinutes,
   inWindow,
   findPowerOrderAlias,
+  isMotionDetected,
 } from "./index.js";
 
 // ============================================================
@@ -26,6 +27,7 @@ function makeCtx(opts?: {
   rooms?: RoomSpec[];
   outdoor?: { humidity: number | null; temperature?: number | null };
   withBoost?: boolean;
+  motion?: Array<{ id: string; name: string }>;
   vmcOrders?: Array<{ alias: string; category?: string; type?: string }>;
 }) {
   const handlers: Handler[] = [];
@@ -91,6 +93,14 @@ function makeCtx(opts?: {
           ? []
           : [makeBinding("temperature", "temperature", r.temperature)]),
       ],
+      orderBindings: [],
+    };
+  }
+
+  for (const m of opts?.motion ?? []) {
+    equipments[m.id] = {
+      name: m.name,
+      dataBindings: [makeBinding("motion", "motion", false)],
       orderBindings: [],
     };
   }
@@ -527,8 +537,10 @@ describe("two-speed ventilation", () => {
       withBoost: true,
       rooms: [{ id: "room-1", name: "SDB", humidity: 55, temperature: 21 }],
     });
+    // Default boostDelta (5): with a permanent low speed, extraction MUST mean
+    // the high speed — otherwise a room at 62 % would trigger nothing at all.
     const inst = createRecipe().createInstance(
-      { ...baseParams, vmcBoost: "boost-1", alwaysOn: true, boostDelta: 0 },
+      { ...baseParams, vmcBoost: "boost-1", alwaysOn: true },
       h.ctx as never,
     );
     expect(vmcOrders(h.orders)).toEqual([true]); // asserted once at start
@@ -542,6 +554,161 @@ describe("two-speed ventilation", () => {
     expect(boostOrders(h.orders)).toEqual([true, false]);
     expect(vmcOrders(h.orders)).toEqual([true]);
     inst.stop();
+  });
+});
+
+describe("occupancy (toilets)", () => {
+  const motionParams = {
+    ...baseParams,
+    rooms: undefined,
+    motionSensors: ["wc-1"],
+    motionConfirm: "1m",
+    motionRunAfter: "15m",
+    motionMaxRun: "45m",
+  };
+
+  /** A dry room, so only the occupancy cycle can move the VMC. */
+  const dryCtx = (extra?: Parameters<typeof makeCtx>[0]) =>
+    makeCtx({
+      rooms: [{ id: "room-1", name: "SDB", humidity: 45, temperature: 21 }],
+      motion: [{ id: "wc-1", name: "WC" }],
+      ...extra,
+    });
+
+  it("classifies motion values from any integration", () => {
+    for (const v of [true, 1, "ON", "true", "detected", "occupied"]) {
+      expect(isMotionDetected(v)).toBe(true);
+    }
+    for (const v of [false, 0, "OFF", "false", null, undefined, {}]) {
+      expect(isMotionDetected(v)).toBe(false);
+    }
+  });
+
+  it("runs for the whole visit and 15 minutes after the last detection", () => {
+    const h = dryCtx();
+    const inst = createRecipe().createInstance(motionParams, h.ctx as never);
+    expect(vmcOrders(h.orders)).toEqual([]);
+
+    h.emit("wc-1", "motion", true);
+    expect(vmcOrders(h.orders)).toEqual([]); // not confirmed yet
+
+    vi.advanceTimersByTime(90_000); // presence held → burst passes the 1 min confirmation
+    expect(vmcOrders(h.orders)).toEqual([true]);
+
+    h.emit("wc-1", "motion", false); // the visitor leaves
+    vi.advanceTimersByTime(14 * 60_000);
+    expect(vmcOrders(h.orders)).toEqual([true]); // still extracting
+
+    vi.advanceTimersByTime(2 * 60_000);
+    expect(vmcOrders(h.orders)).toEqual([true, false]);
+    inst.stop();
+  });
+
+  it("ignores an isolated detection — an open door catching a passer-by", () => {
+    const h = dryCtx();
+    const inst = createRecipe().createInstance(motionParams, h.ctx as never);
+
+    h.emit("wc-1", "motion", true);
+    h.emit("wc-1", "motion", false); // one brief burst
+    vi.advanceTimersByTime(10 * 60_000);
+    expect(vmcOrders(h.orders)).toEqual([]);
+    inst.stop();
+  });
+
+  it("does not accumulate two distant bursts into a fake occupancy", () => {
+    const h = dryCtx();
+    const inst = createRecipe().createInstance(motionParams, h.ctx as never);
+
+    h.emit("wc-1", "motion", true);
+    h.emit("wc-1", "motion", false);
+    vi.advanceTimersByTime(5 * 60_000); // > burst gap
+    h.emit("wc-1", "motion", true);
+    h.emit("wc-1", "motion", false);
+    vi.advanceTimersByTime(5 * 60_000);
+
+    expect(vmcOrders(h.orders)).toEqual([]);
+    inst.stop();
+  });
+
+  it("caps a run of endless detections and pauses 30 minutes", () => {
+    const h = dryCtx();
+    const inst = createRecipe().createInstance(motionParams, h.ctx as never);
+
+    h.emit("wc-1", "motion", true); // door left open: presence never clears
+    vi.advanceTimersByTime(2 * 60_000);
+    expect(vmcOrders(h.orders)).toEqual([true]);
+
+    vi.advanceTimersByTime(45 * 60_000); // past the occupancy maximum
+    expect(vmcOrders(h.orders)).toEqual([true, false]);
+
+    vi.advanceTimersByTime(20 * 60_000); // still paused despite motion
+    expect(vmcOrders(h.orders)).toEqual([true, false]);
+
+    vi.advanceTimersByTime(15 * 60_000); // pause over → a new run is allowed
+    expect(vmcOrders(h.orders)).toEqual([true, false, true]);
+    inst.stop();
+  });
+
+  it("drives the high speed when the low speed is permanent", () => {
+    const h = dryCtx({ withBoost: true });
+    const inst = createRecipe().createInstance(
+      { ...motionParams, vmcBoost: "boost-1", alwaysOn: true },
+      h.ctx as never,
+    );
+    h.emit("wc-1", "motion", true);
+    vi.advanceTimersByTime(90_000);
+    expect(boostOrders(h.orders)).toEqual([true]);
+    expect(vmcOrders(h.orders)).toEqual([true]); // low speed asserted, never cut
+    inst.stop();
+  });
+
+  it("keeps the VMC on when the humidity cycle ends but the visit continues", () => {
+    const h = makeCtx({
+      rooms: [{ id: "room-1", name: "SDB", humidity: 65, temperature: 21 }],
+      motion: [{ id: "wc-1", name: "WC" }],
+    });
+    const inst = createRecipe().createInstance(motionParams, h.ctx as never);
+    expect(vmcOrders(h.orders)).toEqual([true]); // humidity run
+
+    h.emit("wc-1", "motion", true);
+    vi.advanceTimersByTime(16 * 60_000); // confirmed occupancy, past minRun
+    h.emit("room-1", "humidity", 45); // humidity satisfied
+    expect(vmcOrders(h.orders)).toEqual([true]); // occupancy holds it on
+
+    h.emit("wc-1", "motion", false);
+    vi.advanceTimersByTime(16 * 60_000);
+    expect(vmcOrders(h.orders)).toEqual([true, false]);
+    inst.stop();
+  });
+
+  it("respects the quiet window by default and exempts visits on demand", () => {
+    const quiet = { quietMode: "on", quietStart: "10:10", quietEnd: "07:00" };
+
+    const blocked = dryCtx();
+    const a = createRecipe().createInstance({ ...motionParams, ...quiet }, blocked.ctx as never);
+    vi.advanceTimersByTime(20 * 60_000); // now inside the quiet window
+    blocked.emit("wc-1", "motion", true);
+    vi.advanceTimersByTime(2 * 60_000);
+    expect(vmcOrders(blocked.orders)).toEqual([]);
+    a.stop();
+
+    const exempt = dryCtx();
+    const b = createRecipe().createInstance(
+      { ...motionParams, ...quiet, quietScope: "humidity" },
+      exempt.ctx as never,
+    );
+    vi.advanceTimersByTime(20 * 60_000);
+    exempt.emit("wc-1", "motion", true);
+    vi.advanceTimersByTime(2 * 60_000);
+    expect(vmcOrders(exempt.orders)).toEqual([true]);
+    b.stop();
+  });
+
+  it("rejects a motion sensor that reports no motion", () => {
+    const h = dryCtx();
+    expect(() =>
+      createRecipe().validate({ ...motionParams, motionSensors: ["room-1"] }, h.ctx as never),
+    ).toThrow(/no motion/i);
   });
 });
 

@@ -31,6 +31,38 @@ très sec.
 Sans température extérieure, repli sur la comparaison HR brute. Sans capteur
 extérieur, hystérésis max/cible simple.
 
+## ⚠️ Une seule recette par VMC
+
+Ne pilotez pas la même VMC avec cette recette **et** une recette de
+programmation horaire : chacune envoie ses ordres de son côté, le dernier
+gagne, et la plage silencieuse de l'une sera écrasée par le créneau de
+l'autre. Si vous avez besoin d'un fonctionnement horaire de base, utilisez
+l'option « petite vitesse permanente » et laissez cette recette gérer
+l'extraction.
+
+## Détection de présence (WC)
+
+Optionnel : des détecteurs de mouvement placés dans les toilettes déclenchent
+l'extraction pendant tout le passage, prolongée de 15 min après la dernière
+détection.
+
+Le problème des portes laissées ouvertes (détections aléatoires du couloir)
+est traité par trois garde-fous :
+
+1. **Confirmation** (`motionConfirm`, 1 min) — le mouvement doit se *maintenir*
+   pendant cette durée. Une détection isolée ne démarre rien. Deux détections
+   espacées de plus de 3 min appartiennent à deux bursts différents et ne
+   s'additionnent pas : seule une présence réelle, qui fait déclencher le
+   capteur en continu, franchit le seuil.
+2. **Plafond** (`motionMaxRun`, 45 min) — au-delà, ce n'est plus un passage aux
+   toilettes : la recette conclut à des détections parasites, arrête
+   l'extraction et se met en pause 30 min.
+3. **Plage silencieuse** — par défaut elle bloque aussi les passages ; l'option
+   « Humidité seulement » laisse la VMC réagir à un passage nocturne.
+
+Un capteur qui maintient `occupancy = true` sans réémettre d'événement est
+géré : la valeur est relue à chaque évaluation.
+
 ## Paramètres
 
 | Slot                            | Défaut | Rôle                                                                 |
@@ -46,6 +78,11 @@ extérieur, hystérésis max/cible simple.
 | `outdoorSensor` / `outdoorMargin` | vide / 3 pts | Compensation extérieure                                     |
 | `minRun` / `maxRun`             | 15 min / 3 h | Anti court-cycle / arrêt forcé (+ 1 h de repos)                |
 | `quietMode` + `quietStart`/`quietEnd` | off / 22:00–07:00 | Plage silencieuse (aucun démarrage, cycle en cours coupé) |
+| `quietScope`                    | Tout   | Le silence bloque aussi les passages, ou l'humidité seulement         |
+| `motionSensors` (liste)         | vide   | Détecteurs de mouvement des WC                                       |
+| `motionConfirm`                 | 1 min  | Durée de mouvement soutenu avant de démarrer                          |
+| `motionRunAfter`                | 15 min | Prolongation après la dernière détection                             |
+| `motionMaxRun`                  | 45 min | Plafond d'un cycle sur présence (puis 30 min de pause)               |
 
 ## Comportement
 
@@ -54,9 +91,14 @@ extérieur, hystérésis max/cible simple.
 - Une sonde qui n'a rien remonté depuis 1 h est ignorée ; si plus aucune sonde
   n'est fraîche, la VMC est arrêtée plutôt que de tourner à l'aveugle.
 - La durée maxi prime sur tout le reste, y compris la durée mini.
+- Au démarrage d'une instance, aucun ordre d'arrêt n'est envoyé : la recette ne
+  coupe que ce qu'elle a elle-même allumé (une VMC allumée à la main survit à
+  une mise à jour de la recette).
+- Avec la petite vitesse permanente, « extraction » signifie grande vitesse —
+  l'équipement principal n'est jamais coupé.
 - État exposé (visible dans l'UI, exploitable par les modes) : `status`,
-  `reason`, `running`, `vmcOn`, `boostOn`, `maxHumidity`, `maxHumidityRoom`,
-  `outdoorFloor`.
+  `reason`, `running`, `motionRunning`, `vmcOn`, `boostOn`, `maxHumidity`,
+  `maxHumidityRoom`, `outdoorFloor`.
 
 ## Développement
 
