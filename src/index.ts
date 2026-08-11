@@ -159,6 +159,13 @@ const ASSUMED_INDOOR_TEMP = 20;
 const MOTION_BURST_GAP_MS = 3 * 60_000;
 /** Pause after an occupancy run hit its cap — stray detections must not loop. */
 const MOTION_BLOCK_MS = 30 * 60_000;
+/** A relay state that disagrees with our last order is only believed after this
+ *  long — a Zigbee round trip and a slow report are not a human. */
+const MANUAL_CONFIRM_MS = 60_000;
+/** Never re-send the silence order more often than this, whatever fights back. */
+const QUIET_ENFORCE_GAP_MS = 5 * 60_000;
+/** Someone cutting the ventilation by hand is an instruction: stand down. */
+const MANUAL_OVERRIDE_BLOCK_MS = 60 * 60_000;
 
 const SENSOR_TYPES = ["sensor", "weather", "thermostat", "heater", "camera"];
 const VMC_TYPES = ["switch", "appliance"];
@@ -220,6 +227,20 @@ export function inWindow(nowMin: number, startMin: number, endMin: number): bool
 }
 
 const round1 = (v: number): number => Math.round(v * 10) / 10;
+
+/** Whether a relay/switch reading means "closed". Integrations report
+ *  booleans, "ON"/"OFF" strings or 0/1 depending on the device. */
+export function isSwitchOn(value: unknown): boolean | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value > 0;
+  if (typeof value === "string") {
+    const v = value.trim().toLowerCase();
+    if (v === "on" || v === "true" || v === "1") return true;
+    if (v === "off" || v === "false" || v === "0") return false;
+  }
+  return null;
+}
 
 /**
  * Whether a motion/occupancy reading means "someone is there". Integrations
@@ -777,6 +798,9 @@ export function createRecipe(): RecipeDefinition {
       const outdoorEq = outdoorId ? ctx.equipmentManager.getByIdWithDetails(outdoorId) : null;
 
       const vmcOrderAlias = findPowerOrderAlias(vmcEq) ?? "state";
+      // What the relay actually reports, so the recipe can tell its own orders
+      // from someone else's — and notice when its model of the world is stale.
+      const vmcStateAlias = findAlias(vmcEq, ["light_state"], ["state", "power", "switch"]);
       const boostOrderAlias = boostEq ? (findPowerOrderAlias(boostEq) ?? "state") : null;
 
       const outdoorHumAlias = findAlias(outdoorEq, ["humidity_outdoor", "humidity"], ["humidity"]);
@@ -864,6 +888,12 @@ export function createRecipe(): RecipeDefinition {
         return typeof v === "boolean" ? v : null;
       };
       let mainOn: boolean | null = restoreBool("vmcOn");
+      let vmcObserved: boolean | null = null;
+      /** True once the relay has reported the state we ordered. Silence is not
+       *  evidence: a binding that never agrees says nothing about who acted. */
+      let vmcAgreed = false;
+      let mismatchSince: number | null = null;
+      let lastQuietEnforceAt = 0;
       let boostOn: boolean | null = restoreBool("boostOn");
       let highDemand = false; // high-speed hysteresis of the humidity cycle
       let stopped = false;
@@ -904,6 +934,7 @@ export function createRecipe(): RecipeDefinition {
         const firstAssert = mainOn === null;
         mainOn = on;
         putState("vmcOn", on);
+        vmcAgreed = false; // wait for the relay to confirm this one
         if (firstAssert && !on) return;
         ctx.log(`VMC ${on ? "ON" : "OFF"} — ${why}`);
         sendOrder(vmcId, vmcOrderAlias, on, "VMC");
@@ -966,6 +997,11 @@ export function createRecipe(): RecipeDefinition {
             const t = bindingValue(eq, outdoorTempAlias);
             if (t !== null) outdoorTemp = t;
           }
+        }
+        if (vmcStateAlias) {
+          const eq = ctx.equipmentManager.getByIdWithDetails(vmcId);
+          const raw = eq?.dataBindings.find((b) => b.alias === vmcStateAlias)?.value;
+          vmcObserved = isSwitchOn(raw);
         }
         // A PIR that holds `occupancy = true` emits no further event: read the
         // level too, so an ongoing presence keeps refreshing the burst.
@@ -1182,10 +1218,65 @@ export function createRecipe(): RecipeDefinition {
           }
         }
 
+        // ══ Reconcile with the relay ══════════════════════════
+        // Someone else — a hand on the switch, another recipe, another box —
+        // may have flipped it. Believing our own last order after that turns
+        // every later decision into a no-op, so reality wins once it has held
+        // long enough to rule out a slow Zigbee report.
+        if (vmcObserved !== null && vmcObserved === mainOn) {
+          vmcAgreed = true;
+          mismatchSince = null;
+        } else if (vmcAgreed && vmcObserved !== null && mainOn !== null) {
+          mismatchSince ??= now;
+          if (now - mismatchSince >= MANUAL_CONFIRM_MS) {
+            mismatchSince = null;
+            if (!vmcObserved && running) {
+              // Restarting straight away would be arguing with whoever just
+              // reached for the switch. Stand down, then resume normally.
+              blockedUntil = now + MANUAL_OVERRIDE_BLOCK_MS;
+              stopHumidityRun(
+                `VMC coupée en dehors de la recette — retrait ${fmt(MANUAL_OVERRIDE_BLOCK_MS)}`,
+              );
+              status = "cooldown";
+              detail = "VMC coupée manuellement";
+              mainOn = vmcObserved;
+              putState("vmcOn", vmcObserved);
+            } else if (vmcObserved && !quiet) {
+              // Someone wants it running and the recipe has no reason to
+              // object — take note so it stops re-sending an OFF nobody
+              // asked for. Inside the quiet window the opposite holds: the
+              // enforcement below owns the decision, and adopting the state
+              // here would make the two take turns every minute.
+              ctx.log("VMC allumée en dehors de la recette");
+              mainOn = vmcObserved;
+              putState("vmcOn", vmcObserved);
+            }
+          }
+        } else {
+          mismatchSince = null;
+        }
+
         // ══ Outputs ═══════════════════════════════════════════
         const extraction = running || motionRunning;
         const why = running ? detail : motionRunning ? "occupation détectée" : detail;
         applyOutputs(extraction, highDemand, why);
+
+        // ══ Silence is a promise, not a preference ════════════
+        // The recipe stopping at 22:00 is not enough: anything else that
+        // switches the ventilation on inside the window breaks the promise the
+        // user configured. Whatever the recipe owns, it keeps quiet — rate
+        // limited, so a relay that refuses cannot turn this into a loop.
+        if (quiet && !extraction && !alwaysOn && vmcObserved === true) {
+          if (now - lastQuietEnforceAt >= QUIET_ENFORCE_GAP_MS) {
+            lastQuietEnforceAt = now;
+            mainOn = false;
+            putState("vmcOn", false);
+            ctx.log("Plage silencieuse : VMC allumée par autre chose, arrêt imposé", "warn");
+            sendOrder(vmcId, vmcOrderAlias, false, "silence imposé");
+          }
+          setStatus("quiet", "Plage silencieuse — arrêt imposé");
+          return;
+        }
 
         if (motionRunning) {
           setStatus(

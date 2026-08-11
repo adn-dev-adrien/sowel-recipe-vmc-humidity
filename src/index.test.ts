@@ -73,7 +73,7 @@ function makeCtx(opts?: {
   }> = {
     "vmc-1": {
       name: "VMC",
-      dataBindings: [],
+      dataBindings: [makeBinding("state", "light_state", "OFF")],
       orderBindings: opts?.vmcOrders ?? [{ alias: "state", category: "toggle_power", type: "boolean" }],
     },
   };
@@ -81,7 +81,7 @@ function makeCtx(opts?: {
   if (opts?.withBoost) {
     equipments["boost-1"] = {
       name: "VMC GV",
-      dataBindings: [],
+      dataBindings: [makeBinding("state", "light_state", "OFF")],
       orderBindings: [{ alias: "state", category: "toggle_power", type: "boolean" }],
     };
   }
@@ -738,6 +738,78 @@ describe("occupancy (toilets)", () => {
     expect(() =>
       createRecipe().validate({ ...motionParams, motionSensors: ["room-1"] }, h.ctx as never),
     ).toThrow(/no motion/i);
+  });
+});
+
+describe("the relay can be flipped by someone else", () => {
+  const quiet = { quietMode: "on", quietStart: "10:10", quietEnd: "07:00" };
+
+  it("gives up its cycle when the ventilation is switched off elsewhere", () => {
+    const h = makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity: 65, temperature: 21 }] });
+    const inst = createRecipe().createInstance(baseParams, h.ctx as never);
+    expect(vmcOrders(h.orders)).toEqual([true]);
+    h.emit("vmc-1", "state", "ON"); // the relay confirms
+    vi.advanceTimersByTime(31_000); // ...and the recipe sees the confirmation
+
+    h.emit("vmc-1", "state", "OFF"); // someone cuts it
+    vi.advanceTimersByTime(60_000);
+    expect(h.state.get("running")).toBe(true); // too soon to call it a human
+
+    vi.advanceTimersByTime(90_000);
+    expect(h.state.get("running")).toBe(false);
+    expect(h.state.get("vmcOn")).toBe(false);
+    expect(h.state.get("status")).toBe("cooldown");
+
+    // And it stands down instead of arguing, even though the room is still wet.
+    vi.advanceTimersByTime(50 * 60_000);
+    expect(vmcOrders(h.orders)).toEqual([true]);
+    vi.advanceTimersByTime(15 * 60_000); // an hour later it may act again
+    expect(vmcOrders(h.orders)).toEqual([true, true]);
+    inst.stop();
+  });
+
+  it("switches it off again when something starts it inside the quiet window", () => {
+    const h = makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity: 45, temperature: 21 }] });
+    const inst = createRecipe().createInstance({ ...baseParams, ...quiet }, h.ctx as never);
+    vi.advanceTimersByTime(20 * 60_000); // inside the quiet window, recipe idle
+
+    h.emit("vmc-1", "state", "ON"); // something else turns it on
+    vi.advanceTimersByTime(60_000);
+    expect(vmcOrders(h.orders)).toEqual([false]);
+    expect(h.logs.some((l) => l.includes("arrêt imposé"))).toBe(true);
+
+    // A relay that keeps reporting ON must not turn this into an order loop.
+    vi.advanceTimersByTime(2 * 60_000);
+    expect(vmcOrders(h.orders)).toEqual([false]);
+    vi.advanceTimersByTime(5 * 60_000);
+    expect(vmcOrders(h.orders)).toEqual([false, false]);
+    inst.stop();
+  });
+
+  it("leaves it alone when someone starts it outside the quiet window", () => {
+    const h = makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity: 45, temperature: 21 }] });
+    const inst = createRecipe().createInstance(baseParams, h.ctx as never);
+    h.emit("vmc-1", "state", "ON");
+    vi.advanceTimersByTime(5 * 60_000);
+    expect(vmcOrders(h.orders)).toEqual([]);
+    inst.stop();
+  });
+
+  it("never cuts a permanent low speed to enforce the silence", () => {
+    const h = makeCtx({
+      withBoost: true,
+      rooms: [{ id: "room-1", name: "SDB", humidity: 45, temperature: 21 }],
+    });
+    const inst = createRecipe().createInstance(
+      { ...baseParams, ...quiet, twoSpeed: "on", vmcBoost: "boost-1", alwaysOn: "on" },
+      h.ctx as never,
+    );
+    expect(vmcOrders(h.orders)).toEqual([true]); // low speed asserted
+    vi.advanceTimersByTime(20 * 60_000); // quiet window
+    h.emit("vmc-1", "state", "ON");
+    vi.advanceTimersByTime(2 * 60_000);
+    expect(vmcOrders(h.orders)).toEqual([true]); // still only the initial ON
+    inst.stop();
   });
 });
 

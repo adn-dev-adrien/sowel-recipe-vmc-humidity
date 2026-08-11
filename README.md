@@ -85,6 +85,23 @@ géré : la valeur est relue à chaque évaluation.
 | `motionRunAfter`                | 15 min | Prolongation après la dernière détection                             |
 | `motionMaxRun`                  | 45 min | Plafond d'un cycle sur présence (puis 30 min de pause)               |
 
+## La VMC peut être pilotée par autre chose
+
+La recette lit l'état réel du relais, pas seulement ce qu'elle a ordonné :
+
+- **Coupure extérieure** — si la VMC s'éteint pendant un cycle (main sur
+  l'interrupteur, autre système), la recette le constate après une minute,
+  arrête son cycle et **se retire une heure** au lieu de rallumer aussitôt.
+- **Allumage extérieur hors plage silencieuse** — elle en prend note et n'envoie
+  pas d'ordre d'arrêt que personne n'a demandé.
+- **Allumage extérieur pendant la plage silencieuse** — le silence est une
+  promesse : la recette réimpose l'arrêt, au plus une fois toutes les 5 minutes
+  pour qu'un relais récalcitrant ne provoque pas de boucle. Avec la petite
+  vitesse permanente, seule la grande vitesse est concernée.
+
+Un relais qui ne confirme jamais son état n'est jamais interprété comme une
+intervention : le silence d'une sonde n'est pas une preuve.
+
 ## Comportement
 
 - Ordres envoyés **uniquement sur transition** — un pilotage manuel entre deux
