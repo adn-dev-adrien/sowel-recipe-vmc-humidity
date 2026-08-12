@@ -481,15 +481,42 @@ describe("run-time guards", () => {
     inst.stop();
   });
 
-  it("does not start a cycle seconds before the window", () => {
+  it("still starts a useful cycle right before the window, then ends it on time", () => {
     const h = makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity: 45, temperature: 21 }] });
     const inst = createRecipe().createInstance(
       { ...baseParams, quietMode: "on", quietStart: "10:01", quietEnd: "07:00" },
       h.ctx as never,
     );
-    h.emit("room-1", "humidity", 70); // 10:00 — the window opens in a minute
+    h.emit("room-1", "humidity", 70); // 10:00 — a minute of extraction is still worth having
+    expect(vmcOrders(h.orders)).toEqual([true]);
+
+    vi.advanceTimersByTime(90_000); // 10:01:30
+    expect(vmcOrders(h.orders)).toEqual([true, false]);
+    expect(h.state.get("status")).toBe("quiet");
+    inst.stop();
+  });
+
+  it("refuses every restart for the whole window without stalling", () => {
+    const h = makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity: 45, temperature: 21 }] });
+    const inst = createRecipe().createInstance(
+      { ...baseParams, quietMode: "on", quietStart: "10:10", quietEnd: "07:00" },
+      h.ctx as never,
+    );
+    vi.advanceTimersByTime(11 * 60_000); // inside the window
+
+    // Humidity keeps climbing all night: not one order, and the recipe keeps
+    // tracking — the readings it exposes stay current.
+    for (let i = 0; i < 12; i++) {
+      h.emit("room-1", "humidity", 70 + i);
+      vi.advanceTimersByTime(30 * 60_000);
+    }
     expect(vmcOrders(h.orders)).toEqual([]);
     expect(h.state.get("status")).toBe("quiet");
+    expect(h.state.get("maxHumidity")).toBe(81);
+
+    // 07:00 next morning — the window closes and the recipe acts at once.
+    vi.advanceTimersByTime(15 * 60 * 60_000);
+    expect(vmcOrders(h.orders)).toEqual([true]);
     inst.stop();
   });
 

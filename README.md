@@ -110,8 +110,14 @@ intervention : le silence d'une sonde n'est pas une preuve.
   n'est fraîche, la VMC est arrêtée plutôt que de tourner à l'aveugle.
 - **Ordre des règles** : durée maxi > plage silencieuse > durée mini > cible
   atteinte. Le silence prime donc sur l'anti court-cycle — un cycle démarré à
-  21:59 est coupé à 22:00, pas quinze minutes plus tard. Et aucun cycle ne
-  démarre dans les deux minutes qui précèdent la plage.
+  21:59 est coupé net à 22:00, pas quinze minutes plus tard. Un cycle qui vaut
+  la peine avant la plage démarre quand même : ces quelques minutes
+  d'extraction sont prises, elles s'arrêtent à l'heure.
+- Pendant toute la plage silencieuse, **aucun redémarrage** n'est possible, ni
+  par l'humidité ni par une présence (sauf `quietScope` = humidité seulement).
+  La recette continue d'évaluer normalement pendant ce temps — mesures, état et
+  présence restent à jour, seuls les ordres sont retenus — et agit dès la
+  fermeture de la plage.
 - Au démarrage d'une instance, aucun ordre d'arrêt n'est envoyé : la recette ne
   coupe que ce qu'elle a elle-même allumé (une VMC allumée à la main survit à
   une mise à jour de la recette).
