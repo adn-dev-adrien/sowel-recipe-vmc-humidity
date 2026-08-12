@@ -166,6 +166,9 @@ const MANUAL_CONFIRM_MS = 60_000;
 const QUIET_ENFORCE_GAP_MS = 5 * 60_000;
 /** Someone cutting the ventilation by hand is an instruction: stand down. */
 const MANUAL_OVERRIDE_BLOCK_MS = 60 * 60_000;
+/** Starting a cycle this close to the quiet window buys nothing but two
+ *  orders — the window would close it seconds later. */
+const QUIET_START_MARGIN_MS = 2 * 60_000;
 
 const SENSOR_TYPES = ["sensor", "weather", "thermostat", "heater", "camera"];
 const VMC_TYPES = ["switch", "appliance"];
@@ -224,6 +227,11 @@ export function inWindow(nowMin: number, startMin: number, endMin: number): bool
   return startMin < endMin
     ? nowMin >= startMin && nowMin < endMin
     : nowMin >= startMin || nowMin < endMin;
+}
+
+/** Minutes from `fromMin` to the next `targetMin`, wrapping past midnight. */
+export function minutesUntil(fromMin: number, targetMin: number): number {
+  return (targetMin - fromMin + 1440) % 1440;
 }
 
 const round1 = (v: number): number => Math.round(v * 10) / 10;
@@ -1069,6 +1077,10 @@ export function createRecipe(): RecipeDefinition {
         refreshReadings(now);
 
         const quiet = quietEnabled && inWindow(nowMin, quietStartMin, quietEndMin);
+        const quietSoon =
+          quietEnabled &&
+          !quiet &&
+          minutesUntil(nowMin, quietStartMin) * 60_000 <= QUIET_START_MARGIN_MS;
 
         // ══ Occupancy cycle (toilets) ═════════════════════════
         const { lastAt: lastMotionAt, confirmedBy } = motionState(now);
@@ -1172,14 +1184,18 @@ export function createRecipe(): RecipeDefinition {
 
           if (running) {
             const elapsed = now - runStartedAt;
-            if (elapsed < minRunMs) {
-              // Anti short-cycling: keep running, but the speed may adapt.
-              status = "running";
-              detail = `Durée mini en cours — ${worst}`;
-            } else if (quiet) {
+            // The quiet window outranks the minimum run time: anti
+            // short-cycling protects the motor, silence is a promise made to
+            // whoever sleeps next door. A cycle started at 21:59 must not run
+            // fifteen minutes into the night.
+            if (quiet) {
               stopHumidityRun("plage silencieuse");
               status = "quiet";
               detail = "Plage silencieuse";
+            } else if (elapsed < minRunMs) {
+              // Anti short-cycling: keep running, but the speed may adapt.
+              status = "running";
+              detail = `Durée mini en cours — ${worst}`;
             } else if (!hold) {
               stopHumidityRun(
                 blockedByOutdoor
@@ -1195,6 +1211,11 @@ export function createRecipe(): RecipeDefinition {
           } else if (quiet) {
             status = "quiet";
             detail = "Plage silencieuse";
+          } else if (quietSoon) {
+            // Starting now would buy a couple of minutes of extraction and a
+            // pair of pointless orders — the window is about to close it.
+            status = "quiet";
+            detail = `Plage silencieuse imminente`;
           } else if (now < blockedUntil) {
             status = "cooldown";
             detail = "Repos après arrêt sur durée maximale";

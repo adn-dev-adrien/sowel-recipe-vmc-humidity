@@ -108,7 +108,10 @@ intervention : le silence d'une sonde n'est pas une preuve.
   transitions n'est jamais écrasé.
 - Une sonde qui n'a rien remonté depuis 1 h est ignorée ; si plus aucune sonde
   n'est fraîche, la VMC est arrêtée plutôt que de tourner à l'aveugle.
-- La durée maxi prime sur tout le reste, y compris la durée mini.
+- **Ordre des règles** : durée maxi > plage silencieuse > durée mini > cible
+  atteinte. Le silence prime donc sur l'anti court-cycle — un cycle démarré à
+  21:59 est coupé à 22:00, pas quinze minutes plus tard. Et aucun cycle ne
+  démarre dans les deux minutes qui précèdent la plage.
 - Au démarrage d'une instance, aucun ordre d'arrêt n'est envoyé : la recette ne
   coupe que ce qu'elle a elle-même allumé (une VMC allumée à la main survit à
   une mise à jour de la recette).

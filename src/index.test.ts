@@ -9,6 +9,7 @@ import {
   inWindow,
   findPowerOrderAlias,
   isMotionDetected,
+  minutesUntil,
 } from "./index.js";
 
 // ============================================================
@@ -239,6 +240,12 @@ describe("psychrometry", () => {
 });
 
 describe("time helpers", () => {
+  it("counts the minutes to the next occurrence, past midnight", () => {
+    expect(minutesUntil(21 * 60, 22 * 60)).toBe(60);
+    expect(minutesUntil(23 * 60, 7 * 60)).toBe(480);
+    expect(minutesUntil(22 * 60, 22 * 60)).toBe(0);
+  });
+
   it("parses HH:MM and rejects garbage", () => {
     expect(hmToMinutes("22:00")).toBe(1320);
     expect(hmToMinutes("07:30")).toBe(450);
@@ -454,6 +461,35 @@ describe("run-time guards", () => {
 
     vi.advanceTimersByTime(31 * 60_000); // cooldown over → restart
     expect(vmcOrders(h.orders)).toEqual([true, false, true]);
+    inst.stop();
+  });
+
+  it("cuts a cycle the moment the window opens, minimum run or not", () => {
+    // The incident of 2026-08-11: a cycle started at 21:59:50 kept the
+    // ventilation running fifteen minutes into the night, because the
+    // anti short-cycling guard was checked first.
+    const h = makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity: 65, temperature: 21 }] });
+    const inst = createRecipe().createInstance(
+      { ...baseParams, quietMode: "on", quietStart: "10:10", quietEnd: "07:00" },
+      h.ctx as never,
+    );
+    expect(vmcOrders(h.orders)).toEqual([true]); // 10:00, outside the window
+
+    vi.advanceTimersByTime(10 * 60_000 + 30_000); // 10:10 — 10 min into a 15 min floor
+    expect(vmcOrders(h.orders)).toEqual([true, false]);
+    expect(h.state.get("status")).toBe("quiet");
+    inst.stop();
+  });
+
+  it("does not start a cycle seconds before the window", () => {
+    const h = makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity: 45, temperature: 21 }] });
+    const inst = createRecipe().createInstance(
+      { ...baseParams, quietMode: "on", quietStart: "10:01", quietEnd: "07:00" },
+      h.ctx as never,
+    );
+    h.emit("room-1", "humidity", 70); // 10:00 — the window opens in a minute
+    expect(vmcOrders(h.orders)).toEqual([]);
+    expect(h.state.get("status")).toBe("quiet");
     inst.stop();
   });
 
