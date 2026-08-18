@@ -154,6 +154,13 @@ function makeCtx(opts?: {
     },
     dispatchOrder: (equipmentId: string, alias: string, value: unknown) => {
       orders.push({ equipmentId, alias, value });
+      // A well-behaved relay reports the state it was just set to. Tests that
+      // need a silent or disobedient one write the binding themselves.
+      const state = equipments[equipmentId]?.dataBindings.find((b) => b.alias === "state");
+      if (state && typeof value === "boolean") {
+        state.value = value ? "ON" : "OFF";
+        state.lastUpdated = null;
+      }
       return Promise.resolve({ success: true });
     },
   };
@@ -844,10 +851,11 @@ describe("the relay can be flipped by someone else", () => {
     expect(vmcOrders(h.orders)).toEqual([false]);
     expect(h.logs.some((l) => l.includes("arrêt imposé"))).toBe(true);
 
-    // A relay that keeps reporting ON must not turn this into an order loop.
+    // Something insists. The rate limit holds for five minutes, then acts again.
+    h.emit("vmc-1", "state", "ON");
     vi.advanceTimersByTime(2 * 60_000);
     expect(vmcOrders(h.orders)).toEqual([false]);
-    vi.advanceTimersByTime(5 * 60_000);
+    vi.advanceTimersByTime(4 * 60_000);
     expect(vmcOrders(h.orders)).toEqual([false, false]);
     inst.stop();
   });
@@ -1080,6 +1088,52 @@ describe("flags", () => {
   });
 });
 
+describe("what a recipe update must not undo", () => {
+  it("keeps its stand-down across a restart", () => {
+    // A recipe update restarts every instance. An in-memory latch handed the
+    // ventilation straight back — "the VMC comes on right after an update".
+    const first = makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity: 70, temperature: 21 }] });
+    const a = createRecipe().createInstance(baseParams, first.ctx as never);
+    expect(vmcOrders(first.orders)).toEqual([true]);
+    vi.advanceTimersByTime(31_000); // the recipe sees the relay confirm the ON
+    first.emit("vmc-1", "state", "OFF"); // someone cuts it
+    vi.advanceTimersByTime(3 * 60_000); // ...confirmed: stand down for an hour
+    expect(first.state.get("status")).toBe("cooldown");
+    a.stop();
+
+    // Same persisted state, fresh instance, room still wet.
+    const second = makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity: 70, temperature: 21 }] });
+    for (const [k, v] of first.state) second.state.set(k, v);
+    const b = createRecipe().createInstance(baseParams, second.ctx as never);
+    vi.advanceTimersByTime(5 * 60_000);
+    expect(vmcOrders(second.orders)).toEqual([]); // the hour is still owed
+
+    vi.advanceTimersByTime(60 * 60_000);
+    expect(vmcOrders(second.orders)).toEqual([true]); // and then it resumes
+    b.stop();
+  });
+
+  it("sends no order when the ventilation is already in the wanted state", () => {
+    // Spec 141 confirms an order by watching the mirror binding move. An order
+    // that changes nothing is never confirmed, and the instance raises
+    // "Order not confirmed: VMC state → true" for a ventilation that was
+    // already running.
+    const h = makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity: 70, temperature: 21 }] });
+    h.emit("vmc-1", "state", "ON"); // it never stopped across the update
+    const inst = createRecipe().createInstance(baseParams, h.ctx as never);
+
+    expect(vmcOrders(h.orders)).toEqual([]); // nothing to send
+    expect(h.state.get("running")).toBe(true); // but the cycle is owned
+    expect(h.logs.some((l) => l.includes("déjà en marche"))).toBe(true);
+
+    // And it still switches it off when the room is dry.
+    vi.advanceTimersByTime(16 * 60_000);
+    h.emit("room-1", "humidity", 45);
+    expect(vmcOrders(h.orders)).toEqual([false]);
+    inst.stop();
+  });
+});
+
 describe("lifecycle", () => {
   it("stop() clears the clock and unsubscribes, and is idempotent", () => {
     const h = makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity: 65, temperature: 21 }] });
@@ -1104,6 +1158,7 @@ describe("lifecycle", () => {
   it("turns off a VMC it had switched on before a restart", () => {
     // A previous run persisted its ownership; humidity has dropped since.
     const h = makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity: 45, temperature: 21 }] });
+    h.emit("vmc-1", "state", "ON"); // the ventilation really is running
     h.state.set("vmcOn", true);
     const inst = createRecipe().createInstance(baseParams, h.ctx as never);
     expect(vmcOrders(h.orders)).toEqual([false]);

@@ -809,6 +809,9 @@ export function createRecipe(): RecipeDefinition {
       // What the relay actually reports, so the recipe can tell its own orders
       // from someone else's — and notice when its model of the world is stale.
       const vmcStateAlias = findAlias(vmcEq, ["light_state"], ["state", "power", "switch"]);
+      const boostStateAlias = boostEq
+        ? findAlias(boostEq, ["light_state"], ["state", "power", "switch"])
+        : null;
       const boostOrderAlias = boostEq ? (findPowerOrderAlias(boostEq) ?? "state") : null;
 
       const outdoorHumAlias = findAlias(outdoorEq, ["humidity_outdoor", "humidity"], ["humidity"]);
@@ -883,10 +886,8 @@ export function createRecipe(): RecipeDefinition {
       // ── Runtime state ───────────────────────────────────────
       let running = false; // humidity-driven cycle
       let runStartedAt = 0;
-      let blockedUntil = 0;
       let motionRunning = false; // occupancy-driven cycle
       let motionRunStartedAt = 0;
-      let motionBlockedUntil = 0;
       // Restored from the persisted state so a restart (recipe update, param
       // edit) remembers what this recipe switched on — otherwise a VMC turned
       // on by the previous run would never be turned off again. null = the
@@ -895,8 +896,30 @@ export function createRecipe(): RecipeDefinition {
         const v = ctx.state.get(key);
         return typeof v === "boolean" ? v : null;
       };
+      /**
+       * Stand-down deadlines outlive the instance. A recipe update restarts
+       * every instance, and an in-memory latch would hand back a ventilation
+       * the recipe had just decided to leave alone for an hour — the "the VMC
+       * comes on right after an update" report.
+       */
+      const restoreTime = (key: string): number => {
+        const v = ctx.state.get(key);
+        return typeof v === "number" && Number.isFinite(v) ? v : 0;
+      };
+      let blockedUntil = restoreTime("blockedUntil");
+      let motionBlockedUntil = restoreTime("motionBlockedUntil");
+      const setBlockedUntil = (at: number) => {
+        blockedUntil = at;
+        putState("blockedUntil", at);
+      };
+      const setMotionBlockedUntil = (at: number) => {
+        motionBlockedUntil = at;
+        putState("motionBlockedUntil", at);
+      };
+
       let mainOn: boolean | null = restoreBool("vmcOn");
       let vmcObserved: boolean | null = null;
+      let boostObserved: boolean | null = null;
       /** True once the relay has reported the state we ordered. Silence is not
        *  evidence: a binding that never agrees says nothing about who acted. */
       let vmcAgreed = false;
@@ -944,6 +967,16 @@ export function createRecipe(): RecipeDefinition {
         putState("vmcOn", on);
         vmcAgreed = false; // wait for the relay to confirm this one
         if (firstAssert && !on) return;
+        // The relay is already there — usually after a restart, where the
+        // recipe re-decides from scratch while the ventilation never stopped.
+        // Sending the order anyway produces no state change, and the core's
+        // delivery confirmation (spec 141) rightly reports an order nothing
+        // answered.
+        if (vmcObserved === on) {
+          vmcAgreed = true;
+          ctx.log(`VMC déjà ${on ? "en marche" : "à l'arrêt"} — ${why}`);
+          return;
+        }
         ctx.log(`VMC ${on ? "ON" : "OFF"} — ${why}`);
         sendOrder(vmcId, vmcOrderAlias, on, "VMC");
       };
@@ -954,6 +987,10 @@ export function createRecipe(): RecipeDefinition {
         boostOn = on;
         putState("boostOn", on);
         if (firstAssert && !on) return;
+        if (boostObserved === on) {
+          ctx.log(`Grande vitesse déjà ${on ? "en marche" : "à l'arrêt"} — ${why}`);
+          return;
+        }
         ctx.log(`Grande vitesse ${on ? "ON" : "OFF"} — ${why}`);
         sendOrder(boostId, boostOrderAlias, on, "grande vitesse");
       };
@@ -1010,6 +1047,11 @@ export function createRecipe(): RecipeDefinition {
           const eq = ctx.equipmentManager.getByIdWithDetails(vmcId);
           const raw = eq?.dataBindings.find((b) => b.alias === vmcStateAlias)?.value;
           vmcObserved = isSwitchOn(raw);
+        }
+        if (boostId && boostStateAlias) {
+          const eq = ctx.equipmentManager.getByIdWithDetails(boostId);
+          const raw = eq?.dataBindings.find((b) => b.alias === boostStateAlias)?.value;
+          boostObserved = isSwitchOn(raw);
         }
         // A PIR that holds `occupancy = true` emits no further event: read the
         // level too, so an ongoing presence keeps refreshing the burst.
@@ -1090,7 +1132,7 @@ export function createRecipe(): RecipeDefinition {
             // Sustained detections for that long are not a toilet visit —
             // most likely an open door watching a busy hallway.
             motionRunning = false;
-            motionBlockedUntil = now + MOTION_BLOCK_MS;
+            setMotionBlockedUntil(now + MOTION_BLOCK_MS);
             ctx.log(
               `Extraction occupation arrêtée — ${fmt(motionMaxRunMs)} de détections continues (porte ouverte ?), pause de ${fmt(MOTION_BLOCK_MS)}`,
               "warn",
@@ -1117,7 +1159,7 @@ export function createRecipe(): RecipeDefinition {
         if (running && now - runStartedAt >= maxRunMs) {
           // The maximum run time is a hard cap: it outranks every other rule,
           // including the no-data path below.
-          blockedUntil = now + COOLDOWN_AFTER_MAX_RUN_MS;
+          setBlockedUntil(now + COOLDOWN_AFTER_MAX_RUN_MS);
           stopHumidityRun(
             `durée maxi atteinte (${fmt(maxRunMs)}), repos ${fmt(COOLDOWN_AFTER_MAX_RUN_MS)}`,
           );
@@ -1256,7 +1298,7 @@ export function createRecipe(): RecipeDefinition {
             if (!vmcObserved && running) {
               // Restarting straight away would be arguing with whoever just
               // reached for the switch. Stand down, then resume normally.
-              blockedUntil = now + MANUAL_OVERRIDE_BLOCK_MS;
+              setBlockedUntil(now + MANUAL_OVERRIDE_BLOCK_MS);
               stopHumidityRun(
                 `VMC coupée en dehors de la recette — retrait ${fmt(MANUAL_OVERRIDE_BLOCK_MS)}`,
               );
