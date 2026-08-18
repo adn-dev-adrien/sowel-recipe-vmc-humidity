@@ -171,7 +171,7 @@ const QUIET_ENFORCE_GAP_MS = 5 * 60_000;
 const MANUAL_OVERRIDE_BLOCK_MS = 60 * 60_000;
 
 const SENSOR_TYPES = ["sensor", "weather", "thermostat", "heater", "camera"];
-const VMC_TYPES = ["switch", "appliance"];
+const VMC_TYPES = ["switch", "appliance", "vmc"];
 const MOTION_TYPES = ["sensor", "camera"];
 
 // ============================================================
@@ -675,11 +675,16 @@ export function createRecipe(): RecipeDefinition {
       }
       const vmcEq = ctx.equipmentManager.getByIdWithDetails(params.vmc);
       if (!vmcEq) throw new Error("Ventilation equipment not found");
-      if (!findPowerOrderAlias(vmcEq)) {
+      // A native `vmc` equipment (spec 153) is driven through its `speed` order
+      // (off/v1/v2), which the core decomposes with its own safety interlock;
+      // it needs no separate high-speed equipment and ignores the two-speed
+      // slots below.
+      const nativeVmc = vmcEq.type === "vmc";
+      if (!nativeVmc && !findPowerOrderAlias(vmcEq)) {
         throw new Error(`Ventilation "${vmcEq.name}" exposes no on/off order`);
       }
 
-      const twoSpeed = isTwoSpeed(params);
+      const twoSpeed = !nativeVmc && isTwoSpeed(params);
       const boostId = twoSpeed && typeof params.vmcBoost === "string" ? params.vmcBoost : "";
       if (twoSpeed && !boostId) {
         throw new Error("A two-speed unit needs its high-speed equipment");
@@ -772,11 +777,15 @@ export function createRecipe(): RecipeDefinition {
           ? [params.sensors]
           : [];
       const vmcId = params.vmc as string;
+      // Spec 153 — a native `vmc` equipment is a single 2-speed unit driven by
+      // a `speed` order; it never uses a separate boost equipment or the
+      // permanent-low-speed trick.
+      const nativeVmc = ctx.equipmentManager.getByIdWithDetails(vmcId)?.type === "vmc";
       const boostId =
-        isTwoSpeed(params) && typeof params.vmcBoost === "string" && params.vmcBoost
+        !nativeVmc && isTwoSpeed(params) && typeof params.vmcBoost === "string" && params.vmcBoost
           ? params.vmcBoost
           : null;
-      const alwaysOn = flagOn(params.alwaysOn) && boostId !== null;
+      const alwaysOn = !nativeVmc && flagOn(params.alwaysOn) && boostId !== null;
       const humidityMax = Number(params.humidityMax ?? 60);
       const humidityMin = Number(params.humidityMin ?? 50);
       const boostDelta = Number(params.boostDelta ?? 5);
@@ -805,7 +814,9 @@ export function createRecipe(): RecipeDefinition {
       const boostEq = boostId ? ctx.equipmentManager.getByIdWithDetails(boostId) : null;
       const outdoorEq = outdoorId ? ctx.equipmentManager.getByIdWithDetails(outdoorId) : null;
 
-      const vmcOrderAlias = findPowerOrderAlias(vmcEq) ?? "state";
+      // Native VMC: the single logical `speed` order (off/v1/v2). Legacy: the
+      // on/off relay power order.
+      const vmcOrderAlias = nativeVmc ? "speed" : (findPowerOrderAlias(vmcEq) ?? "state");
       // What the relay actually reports, so the recipe can tell its own orders
       // from someone else's — and notice when its model of the world is stale.
       const vmcStateAlias = findAlias(vmcEq, ["light_state"], ["state", "power", "switch"]);
@@ -926,6 +937,10 @@ export function createRecipe(): RecipeDefinition {
       let mismatchSince: number | null = null;
       let lastQuietEnforceAt = 0;
       let boostOn: boolean | null = restoreBool("boostOn");
+      // Native VMC: the last speed the recipe commanded (off/v1/v2). null = never
+      // driven, so a restart must not force an OFF onto a unit running by hand.
+      let lastSpeed: string | null =
+        typeof ctx.state.get("vmcSpeed") === "string" ? (ctx.state.get("vmcSpeed") as string) : null;
       let highDemand = false; // high-speed hysteresis of the humidity cycle
       let stopped = false;
       const lastSeen = new Map<string, unknown>();
@@ -955,6 +970,42 @@ export function createRecipe(): RecipeDefinition {
             const msg = err instanceof Error ? err.message : String(err);
             ctx.log(`Échec ordre ${what} : ${msg}`, "error");
           });
+      };
+
+      /** Native VMC: dispatch the `speed` order (off/v1/v2). The core enforces
+       *  the break-before-make relay interlock, so the recipe just names a speed. */
+      const sendSpeed = (target: string) => {
+        ctx.dispatchOrder(vmcId, "speed", target)
+          .then((res) => {
+            if (res && res.success === false) {
+              ctx.log(`Échec ordre vitesse : ${res.error ?? "erreur"}`, "error");
+            }
+          })
+          .catch((err: unknown) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            ctx.log(`Échec ordre vitesse : ${msg}`, "error");
+          });
+      };
+
+      /**
+       * Native VMC output: one `speed` order per transition. Mirrors setMain's
+       * startup silence (a fresh instance must not force an OFF onto a unit
+       * running by hand) and its "already there" short-circuit.
+       */
+      const applyNativeSpeed = (extraction: boolean, high: boolean, why: string) => {
+        const target = !extraction ? "off" : high ? "v2" : "v1";
+        if (lastSpeed === target) return;
+        const firstAssert = lastSpeed === null;
+        lastSpeed = target;
+        mainOn = extraction;
+        boostOn = extraction && high;
+        putState("vmcOn", extraction);
+        putState("boostOn", extraction && high);
+        putState("vmcSpeed", target);
+        if (firstAssert && target === "off") return;
+        const label = target === "off" ? "arrêt" : target === "v2" ? "grande vitesse" : "petite vitesse";
+        ctx.log(`VMC → ${label} — ${why}`);
+        sendSpeed(target);
       };
 
       // An instance is restarted on every recipe update or param edit. Coming
@@ -1003,6 +1054,10 @@ export function createRecipe(): RecipeDefinition {
        * would "run" without changing anything.
        */
       const applyOutputs = (extraction: boolean, high: boolean, why: string) => {
+        if (nativeVmc) {
+          applyNativeSpeed(extraction, high, why);
+          return;
+        }
         if (alwaysOn) {
           setMain(true, "petite vitesse permanente");
           setBoost(extraction, why);
@@ -1288,7 +1343,12 @@ export function createRecipe(): RecipeDefinition {
         // may have flipped it. Believing our own last order after that turns
         // every later decision into a no-op, so reality wins once it has held
         // long enough to rule out a slow Zigbee report.
-        if (vmcObserved !== null && vmcObserved === mainOn) {
+        // Native VMC (spec 153) skips relay reconciliation: the core equipment
+        // owns the low/high interlock and there is no on/off relay to second-
+        // guess. Manual-override respect on a native unit is left to the core.
+        if (nativeVmc) {
+          // no-op
+        } else if (vmcObserved !== null && vmcObserved === mainOn) {
           vmcAgreed = true;
           mismatchSince = null;
         } else if (vmcAgreed && vmcObserved !== null && mainOn !== null) {
@@ -1339,7 +1399,7 @@ export function createRecipe(): RecipeDefinition {
         // the relay still reports ON for a second or two, and without this
         // gate the enforcement below would accuse the recipe of what it just
         // did — as it did at 22:00:15 on 2026-08-17.
-        if (quiet && !extraction && !alwaysOn && vmcAgreed && vmcObserved === true) {
+        if (!nativeVmc && quiet && !extraction && !alwaysOn && vmcAgreed && vmcObserved === true) {
           if (now - lastQuietEnforceAt >= QUIET_ENFORCE_GAP_MS) {
             lastQuietEnforceAt = now;
             mainOn = false;

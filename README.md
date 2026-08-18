@@ -42,6 +42,18 @@ sends its own orders, the last one wins, and one recipe's quiet window gets
 overwritten by the other's time slot. If you need a baseline schedule, use the
 permanent low speed option and let this recipe own the extraction.
 
+## Native VMC equipment (Sowel core spec 153)
+
+If the ventilation is bound as a single **`vmc`** equipment (Sowel core with the
+2-speed VMC type), select it in the `vmc` slot and the recipe drives it through
+that equipment's `speed` order (`off` / `v1` / `v2`). The core owns the
+break-before-make safety interlock (the two windings are never energized at
+once), so you do **not** wire a separate high-speed equipment and the two-speed
+/ permanent-low-speed / high-speed slots are ignored. The recipe still decides
+the speed from humidity (and occupancy): V2 above `humidityMax + boostDelta`, V1
+above `humidityMax`, off under the target. On an older core with no `vmc` type,
+nothing changes — use the two on/off switch equipments as before.
+
 ## Occupancy (toilets)
 
 Optional: motion sensors in the toilets trigger extraction for the whole visit,
