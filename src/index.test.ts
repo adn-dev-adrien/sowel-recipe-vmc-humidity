@@ -583,10 +583,10 @@ describe("outdoor compensation", () => {
     inst.stop();
   });
 
-  it("raises the effective target to the outdoor floor instead of chasing the configured minimum", () => {
+  it("chases the outdoor floor rather than the configured target", () => {
     const h = makeCtx({
       rooms: [{ id: "room-1", name: "SDB", humidity: 65, temperature: 22 }],
-      outdoor: { humidity: 55, temperature: 22 }, // floor 55 → effective target 58
+      outdoor: { humidity: 55, temperature: 22 }, // floor 55, gain 10
     });
     const inst = createRecipe().createInstance(
       { ...baseParams, outdoorSensor: "out-1", outdoorMargin: 3 },
@@ -595,7 +595,10 @@ describe("outdoor compensation", () => {
     expect(vmcOrders(h.orders)).toEqual([true]);
 
     vi.advanceTimersByTime(16 * 60_000);
-    h.emit("room-1", "humidity", 57); // above the 50 % target but under 58 → done
+    h.emit("room-1", "humidity", 57); // above the floor: there is still water to take out
+    expect(vmcOrders(h.orders)).toEqual([true]);
+
+    h.emit("room-1", "humidity", 54); // at the floor: the outdoor air can do no better
     expect(vmcOrders(h.orders)).toEqual([true, false]);
     inst.stop();
   });
@@ -846,6 +849,23 @@ describe("the relay can be flipped by someone else", () => {
     expect(vmcOrders(h.orders)).toEqual([false]);
     vi.advanceTimersByTime(5 * 60_000);
     expect(vmcOrders(h.orders)).toEqual([false, false]);
+    inst.stop();
+  });
+
+  it("does not accuse anyone when it switches itself off at the quiet boundary", () => {
+    // 2026-08-17 22:00:15 logged "VMC allumée par autre chose, arrêt imposé"
+    // while shutting down its own cycle: the relay had not yet reported the
+    // OFF it had just been sent.
+    const h = makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity: 65, temperature: 21 }] });
+    const inst = createRecipe().createInstance(
+      { ...baseParams, quietMode: "on", quietStart: "10:20", quietEnd: "07:00" },
+      h.ctx as never,
+    );
+    h.emit("vmc-1", "state", "ON"); // the relay confirms the run
+    vi.advanceTimersByTime(21 * 60_000); // the window opens, the recipe stops
+
+    expect(vmcOrders(h.orders)).toEqual([true, false]);
+    expect(h.logs.some((l) => l.includes("allumée par autre chose"))).toBe(false);
     inst.stop();
   });
 

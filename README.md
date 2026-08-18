@@ -22,11 +22,16 @@ plancher = HR_ext × Psat(T_ext) / Psat(T_int)        (formule de Magnus)
 | Mi-saison : 70 % à 15 °C → 21 °C | 70 %         | ~48 %         | ventiler assèche            |
 | Été moite : 70 % à 25 °C → 22 °C | 70 %         | ~84 %         | ventiler **humidifierait**  |
 
-La cible effective de chaque pièce est donc `max(cible configurée, plancher +
-marge)`. Cela répond au cas « HR_ext > 60 % » : la recette ne s'acharne pas à
-descendre sous un plancher inatteignable, et elle ne bloque pas non plus la
-ventilation en hiver alors qu'une HR extérieure de 90 % est en réalité de l'air
-très sec.
+La marge (`outdoorMargin`) est une condition de **démarrage**, pas d'arrêt : un
+cycle ne commence que si la pièce est au moins `marge` points au-dessus du
+plancher, puis il tourne jusqu'à atteindre le plancher (ou la cible configurée,
+la plus haute des deux).
+
+Cette hystérésis est indispensable. Le plancher dérive de deux ou trois points
+au fil de la soirée quand la température extérieure baisse : avec un seuil
+unique, la recette démarre et s'arrête pour une fraction de point — moins que
+la précision des sondes. Le 17 août, un cycle est parti pour 0,7 point de gain
+théorique et a fait descendre la pièce de 0,4 point en une heure.
 
 Sans température extérieure, repli sur la comparaison HR brute. Sans capteur
 extérieur, hystérésis max/cible simple.

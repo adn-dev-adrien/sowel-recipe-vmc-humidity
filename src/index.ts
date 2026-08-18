@@ -19,11 +19,14 @@
 //
 //     floor = RH_ext × Psat(T_ext) / Psat(T_int)
 //
-// Effective minimum per room = max(humidityMin, floor + outdoorMargin), and
-// the VMC only runs while a room is above that AND ventilation still gains
-// at least `outdoorMargin` points. Without an outdoor temperature the recipe
-// falls back to the raw RH comparison; without an outdoor sensor at all it
-// is a plain max/min hysteresis.
+// The margin is a start condition, not a stop one: a cycle begins only when
+// the room sits at least `outdoorMargin` points above the floor, then runs
+// until it reaches the floor (or the configured target, whichever is higher).
+// Without that hysteresis the floor's own drift — a couple of points as the
+// evening cools — starts and stops the ventilation on a fraction of a point,
+// less than the sensors can measure. Without an outdoor temperature the
+// recipe falls back to the raw RH comparison; without an outdoor sensor at
+// all it is a plain max/min hysteresis.
 //
 // Orders are sent on TRANSITIONS only — a manual change in between is never
 // overridden until the next transition.
@@ -1147,22 +1150,30 @@ export function createRecipe(): RecipeDefinition {
             const rh = r.humidity as number;
             const tInt = r.temperature ?? avgTemp;
             const floor = ventilationFloor(outdoorHumidity, outdoorTemp, tInt);
-            const effectiveMin =
-              floor === null ? humidityMin : Math.max(humidityMin, floor + outdoorMargin);
-            // Ventilation is only useful while the room sits above what the
-            // outdoor air can deliver, by at least the drying margin.
-            const useful = floor === null ? true : rh > floor + outdoorMargin;
+            // The target to chase is the floor itself: the margin is what a
+            // cycle must be worth to *begin*, not where it must stop.
+            const effectiveMin = floor === null ? humidityMin : Math.max(humidityMin, floor);
+            // Hysteresis on usefulness, not just on humidity. The drying
+            // margin is what a cycle must be *worth* to begin: the outdoor
+            // floor drifts by a couple of points as the evening cools, so a
+            // single threshold makes the recipe start and stop on a fraction
+            // of a point — less than these sensors can even measure. Once
+            // running, it keeps going until there is nothing left to gain.
+            const gain = floor === null ? Infinity : rh - floor;
+            const worthStarting = gain > outdoorMargin;
+            const worthContinuing = gain > 0;
 
             if (rh > worstHumidity) {
               worstHumidity = rh;
               worstName = r.name;
               worstFloor = floor;
             }
-            if (!useful) {
+            if (!worthContinuing) {
               if (rh >= humidityMax) blockedByOutdoor = true;
               continue;
             }
-            if (rh >= humidityMax) demand = true;
+            if (rh >= humidityMax && !worthStarting) blockedByOutdoor = true;
+            if (rh >= humidityMax && worthStarting) demand = true;
             if (rh > effectiveMin) hold = true;
             if (rh >= humidityMax + boostDelta) boostDemand = true;
             if (rh >= humidityMax) boostHold = true;
@@ -1278,7 +1289,11 @@ export function createRecipe(): RecipeDefinition {
         // switches the ventilation on inside the window breaks the promise the
         // user configured. Whatever the recipe owns, it keeps quiet — rate
         // limited, so a relay that refuses cannot turn this into a loop.
-        if (quiet && !extraction && !alwaysOn && vmcObserved === true) {
+        // `vmcAgreed` matters here: right after the recipe sends its own OFF
+        // the relay still reports ON for a second or two, and without this
+        // gate the enforcement below would accuse the recipe of what it just
+        // did — as it did at 22:00:15 on 2026-08-17.
+        if (quiet && !extraction && !alwaysOn && vmcAgreed && vmcObserved === true) {
           if (now - lastQuietEnforceAt >= QUIET_ENFORCE_GAP_MS) {
             lastQuietEnforceAt = now;
             mainOn = false;
