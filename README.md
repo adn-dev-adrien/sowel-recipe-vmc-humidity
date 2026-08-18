@@ -1,167 +1,155 @@
 # sowel-recipe-vmc-humidity
 
-Recette Sowel externe : pilotage de la VMC à l'humidité des pièces desservies.
+External Sowel recipe: humidity-driven ventilation, on the rooms the unit
+actually serves.
 
-> Quand une pièce supervisée dépasse l'humidité maximale, la VMC démarre et
-> tourne jusqu'à ce que **toutes** les pièces soient repassées sous la cible —
-> sauf si l'air extérieur est trop humide pour les assécher.
+> When a supervised room passes the maximum humidity the ventilation starts and
+> runs until **every** room is back under target — unless the outdoor air is too
+> wet to dry them.
 
-## Le cœur de la recette : le plancher psychrométrique
+## The heart of it: the psychrometric floor
 
-Deux humidités relatives ne sont pas comparables à des températures
-différentes. Ce que la VMC apporte, c'est l'air extérieur **réchauffé à la
-température intérieure** :
+Two relative humidities are not comparable at two temperatures. What the
+ventilation brings in is outdoor air **warmed to the indoor temperature**:
 
 ```
-plancher = HR_ext × Psat(T_ext) / Psat(T_int)        (formule de Magnus)
+floor = RH_out × Psat(T_out) / Psat(T_in)        (Magnus formula)
 ```
 
-| Situation                        | HR_ext brute | Plancher réel | Décision                    |
-| -------------------------------- | ------------ | ------------- | --------------------------- |
-| Hiver : 90 % à 5 °C → 20 °C      | 90 %         | ~34 %         | ventiler assèche fortement  |
-| Mi-saison : 70 % à 15 °C → 21 °C | 70 %         | ~48 %         | ventiler assèche            |
-| Été moite : 70 % à 25 °C → 22 °C | 70 %         | ~84 %         | ventiler **humidifierait**  |
+| Situation                          | Raw RH_out | Actual floor | Verdict                  |
+| ---------------------------------- | ---------- | ------------ | ------------------------ |
+| Winter: 90 % at 5 °C → 20 °C       | 90 %       | ~34 %        | ventilating dries hard   |
+| Shoulder season: 70 % at 15 °C → 21 °C | 70 %   | ~48 %        | ventilating dries        |
+| Muggy summer: 70 % at 25 °C → 22 °C | 70 %      | ~84 %        | ventilating **adds water** |
 
-La marge (`outdoorMargin`) est une condition de **démarrage**, pas d'arrêt : un
-cycle ne commence que si la pièce est au moins `marge` points au-dessus du
-plancher, puis il tourne jusqu'à atteindre le plancher (ou la cible configurée,
-la plus haute des deux).
+`outdoorMargin` is a **start** condition, not a stop one: a cycle begins only
+when the room sits at least `margin` points above the floor, then runs until it
+reaches the floor (or the configured target, whichever is higher).
 
-Cette hystérésis est indispensable. Le plancher dérive de deux ou trois points
-au fil de la soirée quand la température extérieure baisse : avec un seuil
-unique, la recette démarre et s'arrête pour une fraction de point — moins que
-la précision des sondes. Le 17 août, un cycle est parti pour 0,7 point de gain
-théorique et a fait descendre la pièce de 0,4 point en une heure.
+That hysteresis is not optional. The floor drifts two or three points over an
+evening as the outdoor temperature falls; with a single threshold the recipe
+starts and stops over a fraction of a point — less than the sensors can measure.
+On 2026-08-17 a cycle started for a theoretical gain of 0.7 point and took the
+room down by 0.4 point in an hour.
 
-Sans température extérieure, repli sur la comparaison HR brute. Sans capteur
-extérieur, hystérésis max/cible simple.
+With no outdoor temperature, it falls back to comparing raw RH. With no outdoor
+sensor at all, it is a plain max/target hysteresis.
 
-## ⚠️ Une seule recette par VMC
+## ⚠️ One recipe per ventilation
 
-Ne pilotez pas la même VMC avec cette recette **et** une recette de
-programmation horaire : chacune envoie ses ordres de son côté, le dernier
-gagne, et la plage silencieuse de l'une sera écrasée par le créneau de
-l'autre. Si vous avez besoin d'un fonctionnement horaire de base, utilisez
-l'option « petite vitesse permanente » et laissez cette recette gérer
-l'extraction.
+Do not drive the same unit with this recipe **and** a schedule recipe: each
+sends its own orders, the last one wins, and one recipe's quiet window gets
+overwritten by the other's time slot. If you need a baseline schedule, use the
+permanent low speed option and let this recipe own the extraction.
 
-## Détection de présence (WC)
+## Occupancy (toilets)
 
-Optionnel : des détecteurs de mouvement placés dans les toilettes déclenchent
-l'extraction pendant tout le passage, prolongée de 15 min après la dernière
-détection.
+Optional: motion sensors in the toilets trigger extraction for the whole visit,
+extended by 15 minutes after the last detection.
 
-Le problème des portes laissées ouvertes (détections aléatoires du couloir)
-est traité par trois garde-fous :
+Doors left open — which make the sensor fire at random from the hallway — are
+handled by three guards:
 
-1. **Confirmation** (`motionConfirm`, 1 min) — le mouvement doit se *maintenir*
-   pendant cette durée. Une détection isolée ne démarre rien. Deux détections
-   espacées de plus de 3 min appartiennent à deux bursts différents et ne
-   s'additionnent pas : seule une présence réelle, qui fait déclencher le
-   capteur en continu, franchit le seuil.
-2. **Plafond** (`motionMaxRun`, 45 min) — au-delà, ce n'est plus un passage aux
-   toilettes : la recette conclut à des détections parasites, arrête
-   l'extraction et se met en pause 30 min.
-3. **Plage silencieuse** — par défaut elle bloque aussi les passages ; l'option
-   « Humidité seulement » laisse la VMC réagir à un passage nocturne.
+1. **Confirmation** (`motionConfirm`, 1 min) — motion must be *sustained* for
+   that long. An isolated detection starts nothing. Two detections more than
+   3 minutes apart belong to different bursts and do not add up: only a real
+   presence, which keeps the sensor firing, clears the bar.
+2. **Cap** (`motionMaxRun`, 45 min) — beyond that it is no longer a toilet
+   visit: the recipe treats the detections as spurious, stops and pauses for
+   30 minutes.
+3. **Quiet window** — by default it blocks visits too; `quietScope` set to
+   humidity-only lets the ventilation answer a night visit.
 
-Un capteur qui maintient `occupancy = true` sans réémettre d'événement est
-géré : la valeur est relue à chaque évaluation.
+A sensor holding `occupancy = true` without re-emitting an event is handled:
+the value is re-read on every evaluation.
 
-## Paramètres
+## Parameters
 
-| Slot                            | Défaut | Rôle                                                                 |
-| ------------------------------- | ------ | -------------------------------------------------------------------- |
-| `zone`                          | —      | Zone de la VMC                                                       |
-| `sensors` (liste)               | —      | Sondes des pièces desservies (humidité obligatoire, température utile) |
-| `vmc`                           | —      | Équipement on/off (petite vitesse sur une 2 vitesses)                |
-| `twoSpeed`                      | Non    | VMC 2 vitesses : révèle les champs de la grande vitesse              |
-| `vmcBoost`                      | vide   | Équipement de la 2ᵉ vitesse (masqué si `twoSpeed` = Non)             |
-| `alwaysOn`                      | Non    | Petite vitesse permanente : seule la grande vitesse est pilotée      |
-| `humidityMax`                   | 60 %   | Seuil de démarrage                                                   |
-| `humidityMin`                   | 50 %   | Cible d'arrêt                                                        |
-| `boostDelta`                    | 5 pts  | Passage en grande vitesse au-delà de `humidityMax + boostDelta` (masqué si `twoSpeed` = Non) |
-| `outdoorSensor` / `outdoorMargin` | vide / 3 pts | Compensation extérieure                                     |
-| `minRun` / `maxRun`             | 15 min / 3 h | Anti court-cycle / arrêt forcé (+ 1 h de repos)                |
-| `quietMode` + `quietStart`/`quietEnd` | off / 22:00–07:00 | Plage silencieuse (aucun démarrage, cycle en cours coupé) |
-| `quietScope`                    | Tout   | Le silence bloque aussi les passages, ou l'humidité seulement         |
-| `motionSensors` (liste)         | vide   | Détecteurs de mouvement des WC                                       |
-| `motionConfirm`                 | 1 min  | Durée de mouvement soutenu avant de démarrer                          |
-| `motionRunAfter`                | 15 min | Prolongation après la dernière détection                             |
-| `motionMaxRun`                  | 45 min | Plafond d'un cycle sur présence (puis 30 min de pause)               |
+| Slot                              | Default | Role                                                              |
+| --------------------------------- | ------- | ----------------------------------------------------------------- |
+| `zone`                            | —       | Zone of the ventilation                                           |
+| `sensors` (list)                  | —       | Probes of the served rooms (humidity required, temperature useful) |
+| `vmc`                             | —       | On/off equipment (low speed on a two-speed unit)                  |
+| `twoSpeed`                        | No      | Two-speed unit: reveals the high-speed fields                     |
+| `vmcBoost`                        | empty   | Equipment of the second speed (hidden when `twoSpeed` = No)       |
+| `alwaysOn`                        | No      | Permanent low speed: only the high speed is driven                |
+| `humidityMax`                     | 60 %    | Start threshold                                                   |
+| `humidityMin`                     | 50 %    | Stop target                                                       |
+| `boostDelta`                      | 5 pts   | High speed beyond `humidityMax + boostDelta` (hidden when `twoSpeed` = No) |
+| `outdoorSensor` / `outdoorMargin` | empty / 3 pts | Outdoor compensation                                        |
+| `minRun` / `maxRun`               | 15 min / 3 h | Anti short-cycling / forced stop (+ 1 h rest)                |
+| `quietMode` + `quietStart`/`quietEnd` | off / 22:00–07:00 | Quiet window (no start, running cycle cut)      |
+| `quietScope`                      | Everything | Whether the silence also blocks visits, or humidity only       |
+| `motionSensors` (list)            | empty   | Motion sensors of the toilets                                     |
+| `motionConfirm`                   | 1 min   | Sustained motion required before starting                         |
+| `motionRunAfter`                  | 15 min  | Extra run after the last detection                                |
+| `motionMaxRun`                    | 45 min  | Cap of an occupancy cycle (then a 30 min pause)                   |
 
-## La VMC peut être pilotée par autre chose
+## The ventilation can be driven by something else
 
-La recette lit l'état réel du relais, pas seulement ce qu'elle a ordonné :
+The recipe reads the relay's actual state, not just what it ordered:
 
-- **Coupure extérieure** — si la VMC s'éteint pendant un cycle (main sur
-  l'interrupteur, autre système), la recette le constate après une minute,
-  arrête son cycle et **se retire une heure** au lieu de rallumer aussitôt.
-- **Allumage extérieur hors plage silencieuse** — elle en prend note et n'envoie
-  pas d'ordre d'arrêt que personne n'a demandé.
-- **Allumage extérieur pendant la plage silencieuse** — le silence est une
-  promesse : la recette réimpose l'arrêt, au plus une fois toutes les 5 minutes
-  pour qu'un relais récalcitrant ne provoque pas de boucle. Avec la petite
-  vitesse permanente, seule la grande vitesse est concernée.
+- **Switched off elsewhere** — if the ventilation stops during a cycle (a hand
+  on the switch, another system), the recipe notices after a minute, ends its
+  cycle and **stands down for an hour** instead of switching it straight back on.
+- **Switched on outside the quiet window** — it takes note and sends no OFF
+  nobody asked for.
+- **Switched on inside the quiet window** — silence is a promise: the recipe
+  puts it back off, at most once every 5 minutes so a stubborn relay cannot
+  start a loop. With a permanent low speed, only the high speed is concerned.
 
-Un relais qui ne confirme jamais son état n'est jamais interprété comme une
-intervention : le silence d'une sonde n'est pas une preuve.
+A relay that never confirms its state is never read as human intervention: a
+silent sensor is not evidence.
 
-## Comportement
+## Behaviour
 
-- Ordres envoyés **uniquement sur transition** — un pilotage manuel entre deux
-  transitions n'est jamais écrasé.
-- Une sonde qui n'a rien remonté depuis 1 h est ignorée ; si plus aucune sonde
-  n'est fraîche, la VMC est arrêtée plutôt que de tourner à l'aveugle.
-- **Ordre des règles** : durée maxi > plage silencieuse > durée mini > cible
-  atteinte. Le silence prime donc sur l'anti court-cycle — un cycle démarré à
-  21:59 est coupé net à 22:00, pas quinze minutes plus tard. Un cycle qui vaut
-  la peine avant la plage démarre quand même : ces quelques minutes
-  d'extraction sont prises, elles s'arrêtent à l'heure.
-- Pendant toute la plage silencieuse, **aucun redémarrage** n'est possible, ni
-  par l'humidité ni par une présence (sauf `quietScope` = humidité seulement).
-  La recette continue d'évaluer normalement pendant ce temps — mesures, état et
-  présence restent à jour, seuls les ordres sont retenus — et agit dès la
-  fermeture de la plage.
-- Au démarrage d'une instance, aucun ordre d'arrêt n'est envoyé : la recette ne
-  coupe que ce qu'elle a elle-même allumé (une VMC allumée à la main survit à
-  une mise à jour de la recette).
-- Avec la petite vitesse permanente, « extraction » signifie grande vitesse —
-  l'équipement principal n'est jamais coupé.
-- État exposé (visible dans l'UI, exploitable par les modes) : `status`,
-  `reason`, `running`, `motionRunning`, `vmcOn`, `boostOn`, `maxHumidity`,
+- Orders are sent **on transitions only** — a manual change between two
+  transitions is never overridden.
+- A probe that has reported nothing for an hour is ignored; when no probe is
+  fresh any more, the ventilation is stopped rather than run blind.
+- **Rule order**: max run > quiet window > min run > target reached. Silence
+  therefore outranks anti short-cycling — a cycle started at 21:59 is cut dead
+  at 22:00, not fifteen minutes later. A cycle worth starting before the window
+  still starts: those few minutes of extraction are taken, and they end on time.
+- For the whole quiet window **no restart** is possible, by humidity or by
+  presence (unless `quietScope` is humidity-only). The recipe keeps evaluating
+  throughout — readings, state and occupancy stay current, only the orders are
+  withheld — and acts as soon as the window closes.
+- Starting an instance sends no OFF: the recipe only switches off what it
+  switched on itself (a ventilation started by hand survives a recipe update).
+- With a permanent low speed, "extraction" means the high speed — the main
+  equipment is never cut.
+- Exposed state (visible in the UI, usable by modes): `status`, `reason`,
+  `running`, `motionRunning`, `vmcOn`, `boostOn`, `maxHumidity`,
   `maxHumidityRoom`, `outdoorFloor`.
 
-## Formulaire
+## The form
 
-Par défaut la recette est mono-vitesse : un seul équipement marche/arrêt. Le
-drapeau **VMC 2 vitesses** fait apparaître les trois champs associés (grande
-vitesse, petite vitesse permanente, marge grande vitesse) ; sinon ils restent
-masqués. Idem pour la plage silencieuse, dont les heures n'apparaissent qu'une
-fois activée.
+By default the recipe is single-speed: one on/off equipment. The **two-speed**
+flag reveals the three related fields (high speed, permanent low speed,
+high-speed margin); otherwise they stay hidden. Same for the quiet window,
+whose hours only appear once it is enabled.
 
-Deux contraintes du formulaire de recette sont respectées par construction, et
-verrouillées par des tests :
+Two constraints of the recipe form are met by construction and locked by tests:
 
-- la grille dispose un groupe en `n ≤ 3 ? n : 2` colonnes, donc chaque groupe
-  affiche 2, 3, 4 ou 6 champs dans **tous** les états — jamais 5, qui laisserait
-  un trou ;
-- la mise en page groupée n'a pas de rendu pour le type `boolean` (elle
-  retombe sur un champ texte affichant `false`), donc les drapeaux sont des
-  `select` Oui/Non.
+- the grid lays a group out in `n ≤ 3 ? n : 2` columns, so every group shows
+  2, 3, 4 or 6 fields in **every** state — never 5, which would leave a hole;
+- the grouped layout has no renderer for the `boolean` type (it falls back to a
+  text input showing `false`), so the flags are Yes/No `select`s.
 
-Les descriptions de champs sont limitées à 40 caractères : elles s'affichent
-sous chaque champ et un texte long rend le formulaire illisible.
+Labels are capped at 14 characters in the groups that can render three columns,
+20 elsewhere; help text at 20 and 30 characters respectively. A label that wraps
+pushes its field below its neighbours' and the row stops lining up.
 
-## Développement
+## Development
 
 ```bash
 npm install
-npm run build     # → dist/index.js (ce que Sowel charge)
+npm run build     # → dist/index.js (what Sowel loads)
 npm test          # vitest
 ```
 
-Publication d'une version :
+Publishing a version:
 
 ```bash
 npm run build
@@ -169,6 +157,6 @@ tar -czf sowel-recipe-vmc-humidity-<version>.tar.gz manifest.json package.json d
 gh release create v<version> sowel-recipe-vmc-humidity-<version>.tar.gz --title "v<version>"
 ```
 
-Installation sur une instance : **Plugins → Store → Sources personnelles** →
-`adn-dev-adrien/sowel-recipe-vmc-humidity` → Installer → confirmer l'empreinte
-SHA256 (TOFU, spec 136).
+Installing on an instance: **Plugins → Store → Personal sources** →
+`adn-dev-adrien/sowel-recipe-vmc-humidity` → Install → confirm the SHA256
+fingerprint (TOFU, spec 136).
