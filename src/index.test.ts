@@ -878,6 +878,29 @@ describe("the relay can be flipped by someone else", () => {
     inst.stop();
   });
 
+  it("still leaves it alone outside the quiet window after a prior cycle agreed", () => {
+    // Regression: once the recipe and relay have agreed on a state, an external
+    // ON while idle used to be adopted into `mainOn`, and the next applyOutputs
+    // turned that into a true->false transition — an OFF nobody asked for.
+    const h = makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity: 45, temperature: 21 }] });
+    const inst = createRecipe().createInstance(baseParams, h.ctx as never);
+
+    // Drive a real cycle so the recipe and relay agree (vmcAgreed = true).
+    h.emit("room-1", "humidity", 70); // above max -> ON
+    h.emit("vmc-1", "state", "ON"); // relay confirms
+    vi.advanceTimersByTime(16 * 60_000); // outlast minRun
+    h.emit("room-1", "humidity", 45); // below target -> OFF
+    h.emit("vmc-1", "state", "OFF"); // relay confirms
+    vi.advanceTimersByTime(60_000); // a tick reconciles the OFF -> agreed again
+    expect(vmcOrders(h.orders)).toEqual([true, false]);
+
+    // Now someone flips it on by hand. The recipe must NOT send an OFF.
+    h.emit("vmc-1", "state", "ON");
+    vi.advanceTimersByTime(5 * 60_000);
+    expect(vmcOrders(h.orders)).toEqual([true, false]); // no extra order
+    inst.stop();
+  });
+
   it("never cuts a permanent low speed to enforce the silence", () => {
     const h = makeCtx({
       withBoost: true,

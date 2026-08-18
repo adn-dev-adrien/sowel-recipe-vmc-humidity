@@ -1266,13 +1266,17 @@ export function createRecipe(): RecipeDefinition {
               putState("vmcOn", vmcObserved);
             } else if (vmcObserved && !quiet) {
               // Someone wants it running and the recipe has no reason to
-              // object — take note so it stops re-sending an OFF nobody
-              // asked for. Inside the quiet window the opposite holds: the
-              // enforcement below owns the decision, and adopting the state
-              // here would make the two take turns every minute.
+              // object — leave it alone. Do NOT copy the observed state into
+              // `mainOn`: that field is what the recipe last COMMANDED, and
+              // `applyOutputs` re-asserts it every tick. Adopting `true` here
+              // while the recipe is idle would make the very next applyOutputs
+              // see a true→false transition and fire an OFF nobody asked for.
+              // Clearing `vmcAgreed` instead stops this reconciliation from
+              // looping until the recipe acts or the relay reports off again.
+              // Inside the quiet window the opposite holds: the enforcement
+              // below owns the decision.
               ctx.log("VMC allumée en dehors de la recette");
-              mainOn = vmcObserved;
-              putState("vmcOn", vmcObserved);
+              vmcAgreed = false;
             }
           }
         } else {
