@@ -611,6 +611,54 @@ describe("outdoor compensation", () => {
   });
 });
 
+describe("a bad reading must not remove the outdoor guard", () => {
+  const params = { ...baseParams, outdoorSensor: "out-1", outdoorMargin: 3 };
+
+  it("keeps the last good outdoor humidity when an event carries rubbish", () => {
+    // 2026-08-21: a cycle started at 11:11 with a computed gain of +1.5, under
+    // the 3-point margin. `outdoorHumidity = num(value)` turned a non-numeric
+    // report into null, the floor became null, and a null floor reads as "no
+    // outdoor constraint at all".
+    const h = makeCtx({
+      rooms: [{ id: "room-1", name: "SDB", humidity: 62, temperature: 22 }],
+      outdoor: { humidity: 60, temperature: 22 }, // floor 60, gain 2 — too small
+    });
+    const inst = createRecipe().createInstance(params, h.ctx as never);
+    expect(vmcOrders(h.orders)).toEqual([]);
+
+    h.emit("out-1", "humidity", null);
+    h.emit("out-1", "humidity", "n/a");
+    vi.advanceTimersByTime(2 * 60_000);
+    expect(vmcOrders(h.orders)).toEqual([]); // still guarded
+    expect(h.state.get("outdoorFloor")).toBe(60);
+    inst.stop();
+  });
+
+  it("waits rather than starting unchecked when the outdoor sensor never reported", () => {
+    const h = makeCtx({
+      rooms: [{ id: "room-1", name: "SDB", humidity: 70, temperature: 22 }],
+      outdoor: { humidity: null, temperature: 22 },
+    });
+    const inst = createRecipe().createInstance(params, h.ctx as never);
+    vi.advanceTimersByTime(2 * 60_000);
+    expect(vmcOrders(h.orders)).toEqual([]);
+
+    h.emit("out-1", "humidity", 50); // it finally speaks: gain 20
+    expect(vmcOrders(h.orders)).toEqual([true]);
+    inst.stop();
+  });
+
+  it("states the floor and the gain in the log", () => {
+    const h = makeCtx({
+      rooms: [{ id: "room-1", name: "SDB", humidity: 70, temperature: 22 }],
+      outdoor: { humidity: 50, temperature: 22 },
+    });
+    const inst = createRecipe().createInstance(params, h.ctx as never);
+    expect(h.logs.some((l) => l.includes("plancher 50 %") && l.includes("gain 20 pts"))).toBe(true);
+    inst.stop();
+  });
+});
+
 describe("two-speed ventilation", () => {
   it("uses the high speed above max + margin and releases it under the maximum", () => {
     const h = makeCtx({

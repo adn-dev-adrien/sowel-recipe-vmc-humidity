@@ -33,7 +33,14 @@ On 2026-08-17 a cycle started for a theoretical gain of 0.7 point and took the
 room down by 0.4 point in an hour.
 
 With no outdoor temperature, it falls back to comparing raw RH. With no outdoor
-sensor at all, it is a plain max/target hysteresis.
+sensor at all, it is a plain max/target hysteresis. A sensor that is configured
+but has not reported yet is **not** treated as "no constraint": the recipe waits
+rather than starting unchecked, and a reading that arrives unparseable never
+erases the last good one.
+
+Every start and stop states the numbers it acted on — `SDB à 64.7 % (plancher
+54.6 %, gain 10.1 pts)` — so a decision can be re-read months later without
+replaying InfluxDB against the sensors' own sampling.
 
 ## ⚠️ One recipe per ventilation
 
