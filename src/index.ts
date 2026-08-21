@@ -1257,7 +1257,11 @@ export function createRecipe(): RecipeDefinition {
             // of a point — less than these sensors can even measure. Once
             // running, it keeps going until there is nothing left to gain.
             const gain = floor === null ? Infinity : rh - floor;
-            const worthStarting = gain > outdoorMargin;
+            // An outdoor sensor that is configured but has not reported yet is
+            // not the same as having none: the guard is unknown, not absent,
+            // so a cycle waits rather than starting unchecked.
+            const outdoorUnknown = outdoorId !== null && outdoorHumidity === null;
+            const worthStarting = !outdoorUnknown && gain > outdoorMargin;
             const worthContinuing = gain > 0;
 
             if (rh > worstHumidity) {
@@ -1280,7 +1284,14 @@ export function createRecipe(): RecipeDefinition {
           putState("maxHumidityRoom", worstName);
           putState("outdoorFloor", worstFloor === null ? null : round1(worstFloor));
 
-          const worst = `${worstName} à ${round1(worstHumidity)} %`;
+          // The log has to carry the numbers the decision was made on. Without
+          // the floor and the gain, a start can only be second-guessed by
+          // replaying InfluxDB against the sensors' own sampling — which is
+          // exactly what made 2026-08-21 11:11 unexplainable after the fact.
+          const worst =
+            worstFloor === null
+              ? `${worstName} à ${round1(worstHumidity)} %`
+              : `${worstName} à ${round1(worstHumidity)} % (plancher ${round1(worstFloor)} %, gain ${round1(worstHumidity - worstFloor)} pts)`;
           const floorText = worstFloor === null ? "?" : String(round1(worstFloor));
 
           if (running) {
@@ -1452,22 +1463,32 @@ export function createRecipe(): RecipeDefinition {
           for (const r of rooms) {
             if (r.id !== eqId) continue;
             if (alias === r.humAlias) {
-              r.humidity = num(value);
+              // A bad reading is not news: keep the last good one and let the
+              // staleness window decide. Nulling it here would erase the very
+              // measurement the decision rests on.
+              const parsed = num(value);
+              if (parsed !== null) r.humidity = parsed;
               r.humidityAt = Date.now();
               matched = true;
             }
             if (r.tempAlias && alias === r.tempAlias) {
-              r.temperature = num(value);
+              const parsed = num(value);
+              if (parsed !== null) r.temperature = parsed;
               matched = true;
             }
           }
           if (outdoorId && eqId === outdoorId) {
             if (alias === outdoorHumAlias) {
-              outdoorHumidity = num(value);
+              // The dangerous one: a null outdoor humidity makes the floor
+              // null, which reads as "no outdoor constraint" and lets a cycle
+              // start unchecked.
+              const parsed = num(value);
+              if (parsed !== null) outdoorHumidity = parsed;
               matched = true;
             }
             if (alias === outdoorTempAlias) {
-              outdoorTemp = num(value);
+              const parsed = num(value);
+              if (parsed !== null) outdoorTemp = parsed;
               matched = true;
             }
           }
