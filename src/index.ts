@@ -39,12 +39,7 @@
 // overridden until the next transition.
 // ============================================================
 
-import {
-  createShowerDetector,
-  SHOWER_RISE_PTS,
-  SHOWER_TEMP_RISE_C,
-  type ShowerHit,
-} from "./shower-detector.js";
+import { createShowerDetector, SHOWER_TEMP_RISE_C, type ShowerHit } from "./shower-detector.js";
 
 // ============================================================
 // Types (mirrored from Sowel core — recipe packages don't import core)
@@ -188,6 +183,51 @@ const MANUAL_OVERRIDE_BLOCK_MS = 60 * 60_000;
  *  cycle ends. Exactly is asymptotic: the last point costs longer than the
  *  first three. */
 const SHOWER_RECOVERY_PTS = 1;
+
+/**
+ * Every bathroom answers a shower differently.
+ *
+ * Volume, extraction, whether the door was open, and above all where the probe
+ * hangs — over the door or beside the shower — decide whether the same shower
+ * shows up as four points of relative humidity or twenty-five. One bar for
+ * every room is therefore either deaf in the large one or jumpy in the small
+ * one, and no default can be right for both.
+ *
+ * So the configured value is a *starting* bar, and each room then fits its own
+ * on what its showers actually do to it: the bar sits at a third of the
+ * amplitude the room reaches, which puts the trigger part-way up the ramp
+ * rather than at the peak. Bounded on both sides — a bar under 3 points would
+ * be inside the weather (the worst measured drift is 1.5 points over a
+ * window), and one over 15 could not be cleared by an ordinary shower.
+ */
+const SHOWER_BAR_RATIO = 0.35;
+const SHOWER_BAR_MIN = 3;
+const SHOWER_BAR_MAX = 15;
+/** How many past showers a room's bar is fitted on. */
+const SHOWER_AMPLITUDE_KEEP = 5;
+/** One shower is an anecdote. The starting bar holds until there are two. */
+const SHOWER_AMPLITUDE_MIN = 2;
+
+/**
+ * The temperature side stays global on purpose. 0.5 °C is not an amplitude,
+ * it is a sign test — "did the room warm up while it got wetter" — sitting
+ * just above what a probe reporting in 0.1 steps can resolve. A bathroom where
+ * a shower does not raise the temperature by half a degree has a probe that
+ * cannot see showers at all, and tuning would only paper over it.
+ */
+
+export function median(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+/** The humidity bar for one room, fitted on the showers it has shown. */
+export function showerBar(amplitudes: number[], configured: number): number {
+  if (amplitudes.length < SHOWER_AMPLITUDE_MIN) return configured;
+  const fitted = median(amplitudes) * SHOWER_BAR_RATIO;
+  return Math.round(Math.max(SHOWER_BAR_MIN, Math.min(SHOWER_BAR_MAX, fitted)) * 10) / 10;
+}
 
 const SENSOR_TYPES = ["sensor", "weather", "thermostat", "heater", "camera"];
 const VMC_TYPES = ["switch", "appliance", "vmc"];
@@ -477,7 +517,7 @@ function buildSlots(): RecipeSlotDef[] {
     {
       id: "showerMode",
       name: "Shower",
-      description: "Extract on a detected shower",
+      description: "Extract on a shower",
       type: "select",
       required: false,
       defaultValue: "on",
@@ -488,9 +528,19 @@ function buildSlots(): RecipeSlotDef[] {
       group: "shower",
     },
     {
+      id: "showerRise",
+      name: "Shower rise",
+      description: "Points, then learned",
+      type: "number",
+      required: false,
+      defaultValue: 4,
+      constraints: { min: 2, max: 15 },
+      group: "shower",
+    },
+    {
       id: "showerMaxRun",
       name: "Shower max",
-      description: "Cap of a drying cycle",
+      description: "Cap of one cycle",
       type: "duration",
       required: false,
       defaultValue: "1h",
@@ -607,10 +657,11 @@ const I18N_FR: RecipeLangPack = {
 
     showerMode: {
       name: "Douche",
-      description: "Extraction sur douche détectée",
+      description: "Sur douche détectée",
       options: { on: "Oui", off: "Non" },
     },
-    showerMaxRun: { name: "Maxi séchage", description: "Plafond d'un cycle douche" },
+    showerRise: { name: "Seuil douche", description: "Points, puis appris" },
+    showerMaxRun: { name: "Maxi séchage", description: "Plafond du cycle" },
 
     minRun: { name: "Marche mini", description: "Anti court-cycle" },
     maxRun: { name: "Marche maxi", description: "Arrêt forcé + repos" },
@@ -830,6 +881,10 @@ export function createRecipe(): RecipeDefinition {
         if (!(showerMax > 0)) {
           throw new Error("Shower drying cap must be positive (e.g. 1h)");
         }
+        const rise = Number(params.showerRise ?? 4);
+        if (!Number.isFinite(rise) || rise < 2) {
+          throw new Error("Shower rise must be at least 2 points of humidity");
+        }
       }
     },
 
@@ -878,6 +933,7 @@ export function createRecipe(): RecipeDefinition {
       const motionMaxRunMs = ctx.helpers.parseDuration(params.motionMaxRun ?? "45m");
       const showerEnabled = isShowerEnabled(params);
       const showerMaxRunMs = ctx.helpers.parseDuration(params.showerMaxRun ?? "1h");
+      const showerRisePts = Number(params.showerRise ?? 4);
 
       // ── Resolve equipments and aliases once ─────────────────
       const vmcEq = ctx.equipmentManager.getByIdWithDetails(vmcId);
@@ -1231,6 +1287,10 @@ export function createRecipe(): RecipeDefinition {
         /** Humidity the room must come back to — its level before the shower. */
         target: number;
         startedAt: number;
+        /** Where the room stood before the shower, and the highest it reached:
+         *  their difference is what this room's bar is fitted on. */
+        baseline: number;
+        peak: number;
       }
       /** One entry per room still drying out. */
       const showerCycles = new Map<string, ShowerCycle>();
@@ -1255,6 +1315,10 @@ export function createRecipe(): RecipeDefinition {
               name: typeof cycle.name === "string" ? cycle.name : id.slice(0, 8),
               target: cycle.target,
               startedAt: cycle.startedAt,
+              // Cycles written before the fit existed carry neither, and the
+              // target is what they knew about the room's own level.
+              baseline: typeof cycle.baseline === "number" ? cycle.baseline : cycle.target,
+              peak: typeof cycle.peak === "number" ? cycle.peak : cycle.target,
             });
           }
         } catch {
@@ -1268,16 +1332,62 @@ export function createRecipe(): RecipeDefinition {
         putState("showerCycles", JSON.stringify([...showerCycles.entries()]));
       };
 
+      /**
+       * What a shower does to each room, in points of relative humidity —
+       * the only thing that can tell a large bathroom with the probe over the
+       * door from a small one with the probe beside the shower.
+       */
+      const showerAmplitudes = new Map<string, number[]>();
+      const restoreAmplitudes = () => {
+        const raw = ctx.state.get("showerAmplitudes");
+        if (typeof raw !== "string" || !raw) return;
+        try {
+          const parsed: unknown = JSON.parse(raw);
+          if (!Array.isArray(parsed)) return;
+          for (const entry of parsed) {
+            if (!Array.isArray(entry) || entry.length !== 2) continue;
+            const [id, values] = entry as [unknown, unknown];
+            if (typeof id !== "string" || !Array.isArray(values)) continue;
+            const kept = values.filter((v): v is number => typeof v === "number" && v > 0);
+            if (kept.length > 0) showerAmplitudes.set(id, kept.slice(-SHOWER_AMPLITUDE_KEEP));
+          }
+        } catch {
+          // Unreadable history: the rooms simply start from the configured bar.
+        }
+      };
+      restoreAmplitudes();
+
+      /** This room's bar — the configured one until the room has shown two. */
+      const barFor = (id: string): number =>
+        showerBar(showerAmplitudes.get(id) ?? [], showerRisePts);
+
+      /** Fold a finished cycle into the room's history, and say so if the bar
+       *  it will use next time actually moved. */
+      const recordAmplitude = (id: string, name: string, amplitude: number) => {
+        if (!(amplitude > 0)) return;
+        const before = barFor(id);
+        const values = showerAmplitudes.get(id) ?? [];
+        values.push(round1(amplitude));
+        showerAmplitudes.set(id, values.slice(-SHOWER_AMPLITUDE_KEEP));
+        putState("showerAmplitudes", JSON.stringify([...showerAmplitudes.entries()]));
+        const after = barFor(id);
+        if (Math.abs(after - before) >= 0.5) {
+          ctx.log(
+            `${name} : seuil de détection ${before} → ${after} pts — les douches y font ${round1(median(showerAmplitudes.get(id) ?? []))} pts`,
+          );
+        }
+      };
+
       /** Feed every fresh room to the detector, and collect what it names. */
       const pollShowers = (now: number): Array<{ room: Room; hit: ShowerHit }> => {
         const hits: Array<{ room: Room; hit: ShowerHit }> = [];
         for (const r of rooms) {
           if (r.humidity === null || now - r.humidityAt > STALE_READING_MS) continue;
-          const hit = showerDetector.sample(r.id, {
-            at: now,
-            humidity: r.humidity,
-            temperature: r.temperature,
-          });
+          const hit = showerDetector.sample(
+            r.id,
+            { at: now, humidity: r.humidity, temperature: r.temperature },
+            { risePts: barFor(r.id) },
+          );
           if (hit !== null) hits.push({ room: r, hit });
         }
         return hits;
@@ -1379,9 +1489,15 @@ export function createRecipe(): RecipeDefinition {
               );
             } else {
               const target = round1(hit.baseline + SHOWER_RECOVERY_PTS);
-              showerCycles.set(room.id, { name: room.name, target, startedAt: now });
+              showerCycles.set(room.id, {
+                name: room.name,
+                target,
+                startedAt: now,
+                baseline: hit.baseline,
+                peak: rh,
+              });
               ctx.log(
-                `Douche détectée (${room.name}) — ${round1(rh)} % (+${gained} pts avec +${round1(hit.tempGain)} °C), séchage jusqu'à ${target} %`,
+                `Douche détectée (${room.name}) — ${round1(rh)} % (+${gained} pts avec +${round1(hit.tempGain)} °C, seuil ${round1(hit.risePts)} pts), séchage jusqu'à ${target} %`,
               );
             }
           }
@@ -1394,6 +1510,9 @@ export function createRecipe(): RecipeDefinition {
               ctx.log(`Séchage ${cycle.name} arrêté — plus de mesure d'humidité`, "warn");
               continue;
             }
+            // The room keeps climbing for a while after the water stops: the
+            // amplitude is only known once the cycle is over.
+            if (rh > cycle.peak) cycle.peak = rh;
             const floor = ventilationFloor(
               outdoorHumidity,
               outdoorTemp,
@@ -1404,17 +1523,22 @@ export function createRecipe(): RecipeDefinition {
               ctx.log(
                 `Séchage ${cycle.name} terminé — ${round1(rh)} %, niveau d'avant la douche retrouvé en ${fmt(now - cycle.startedAt)}`,
               );
+              recordAmplitude(id, cycle.name, cycle.peak - cycle.baseline);
             } else if (floor !== null && rh <= floor) {
               showerCycles.delete(id);
               ctx.log(
                 `Séchage ${cycle.name} arrêté à ${round1(rh)} % — l'air extérieur ne peut pas faire mieux (plancher ${round1(floor)} %)`,
               );
+              recordAmplitude(id, cycle.name, cycle.peak - cycle.baseline);
             } else if (now - cycle.startedAt >= showerMaxRunMs) {
               showerCycles.delete(id);
               ctx.log(
                 `Séchage ${cycle.name} arrêté — ${fmt(showerMaxRunMs)} sans revenir à ${round1(cycle.target)} % (encore ${round1(rh)} %)`,
                 "warn",
               );
+              // Deliberately not folded in: a cycle that never came back says
+              // nothing about the amplitude of a shower in that room, and
+              // would drag the bar towards a number nothing measured.
             }
           }
         } else if (showerCycles.size > 0) {
@@ -1768,7 +1892,7 @@ export function createRecipe(): RecipeDefinition {
             ? `, ${motionSensors.length} détecteur(s) (confirmation ${fmt(motionConfirmMs)}, prolongation ${fmt(motionRunAfterMs)})`
             : "") +
           (showerEnabled
-            ? `, détection douche (+${SHOWER_RISE_PTS} pts avec +${SHOWER_TEMP_RISE_C} °C, séchage maxi ${fmt(showerMaxRunMs)})`
+            ? `, détection douche (+${showerRisePts} pts avec +${SHOWER_TEMP_RISE_C} °C, seuil ajusté par pièce, séchage maxi ${fmt(showerMaxRunMs)})`
             : "") +
           (quietEnabled
             ? `, silence ${String(params.quietStart ?? "22:00")}–${String(params.quietEnd ?? "07:00")}${quietScope === "humidity" ? " (humidité seulement)" : ""}`

@@ -66,6 +66,31 @@ judged the same way. The room needs a temperature probe; one that reports
 humidity only falls back to the plain thresholds, and the recipe says so at
 startup.
 
+### Each bathroom sets its own bar
+
+Volume, extraction, an open door, and above all where the probe hangs — over
+the door or beside the shower — decide whether the same shower reads as four
+points or twenty-five. A single threshold is therefore deaf in one room and
+jumpy in the other.
+
+So `showerRise` is only a **starting** bar. Each room then fits its own on what
+its showers actually do to it: the bar settles at about a third of the
+amplitude the room reaches, which puts the trigger part-way up the ramp rather
+than at the peak. It takes two measured showers before a room stops using the
+configured value, keeps the last five, and is bounded to 3–15 points — under 3
+lies the weather (the worst drift measured over a window is 1.5 points), over
+15 no ordinary shower would clear it. A cycle that hit its cap without the room
+ever coming back teaches nothing and is not counted.
+
+The fit is stated in the journal when it moves — `SDB : seuil de détection
+4 → 8.3 pts — les douches y font 23.7 pts` — and it survives a recipe update.
+
+The **temperature** side stays the same everywhere on purpose. 0.5 °C is not an
+amplitude, it is a sign test — did the room warm up while it got wetter —
+sitting just above what a probe reporting in 0.1 steps can resolve. A bathroom
+where a shower does not move the temperature half a degree has a probe that
+cannot see showers at all, and tuning would only paper over it.
+
 What follows is a **drying cycle**, not a normal one:
 
 - it targets the humidity the room had **before** the shower (+1 point — the
@@ -151,6 +176,7 @@ the value is re-read on every evaluation.
 | `motionRunAfter`                  | 15 min  | Extra run after the last detection                                |
 | `motionMaxRun`                    | 45 min  | Cap of an occupancy cycle (then a 30 min pause)                   |
 | `showerMode`                      | Yes     | Detect showers and dry the room back to its pre-shower level      |
+| `showerRise`                      | 4 pts   | Starting bar, then fitted per room                                 |
 | `showerMaxRun`                    | 1 h     | Cap of a drying cycle                                             |
 
 ## The ventilation can be driven by something else

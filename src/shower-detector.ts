@@ -42,6 +42,12 @@ export interface ShowerReading {
   temperature: number | null;
 }
 
+/** Per-room overrides of the thresholds, for a caller that learns them. */
+export interface ShowerThresholds {
+  risePts?: number;
+  tempRiseC?: number;
+}
+
 export interface ShowerHit {
   /** Humidity the room sat at before the shower — the driest sample of the
    *  window, and the level a drying cycle should chase. */
@@ -53,6 +59,9 @@ export interface ShowerHit {
   tempGain: number;
   /** How long ago the baseline was measured, ms. */
   sinceMs: number;
+  /** The bar this rise had to clear, in points. Worth logging: it is what a
+   *  caller that tunes per room has to be able to explain afterwards. */
+  risePts: number;
 }
 
 export interface ShowerDetectorOptions {
@@ -87,8 +96,14 @@ export interface ShowerDetector {
    * the way out, so a caller ticking every 30 s is told once, not ninety
    * times. Call it on every evaluation — repeated identical readings are
    * cheap, and a gap in the calls only shortens the memory.
+   *
+   * `thresholds` overrides the detector's defaults for THIS room. Bathrooms
+   * are not comparable: volume, extraction and above all where the probe hangs
+   * decide whether a shower shows up as four points or twenty-five. A caller
+   * that has watched a room can say so here, and a caller that has not simply
+   * leaves it out.
    */
-  sample(id: string, reading: ShowerReading): ShowerHit | null;
+  sample(id: string, reading: ShowerReading, thresholds?: ShowerThresholds): ShowerHit | null;
   /** Drop a room's window (sensor removed, detection turned off). */
   forget(id: string): void;
 }
@@ -102,8 +117,10 @@ export function createShowerDetector(options: ShowerDetectorOptions = {}): Showe
   const windows = new Map<string, Sample[]>();
 
   return {
-    sample(id: string, reading: ShowerReading): ShowerHit | null {
+    sample(id: string, reading: ShowerReading, thresholds?: ShowerThresholds): ShowerHit | null {
       const { at, humidity, temperature } = reading;
+      const roomRise = thresholds?.risePts ?? risePts;
+      const roomTempRise = thresholds?.tempRiseC ?? tempRiseC;
       if (!Number.isFinite(humidity)) return null;
 
       let samples = windows.get(id);
@@ -130,12 +147,12 @@ export function createShowerDetector(options: ShowerDetectorOptions = {}): Showe
 
       const gain = humidity - anchor.h;
       const tempGain = temperature - anchorTemp;
-      if (gain < risePts || tempGain < tempRiseC) return null;
+      if (gain < roomRise || tempGain < roomTempRise) return null;
 
       // Consume the burst: re-anchoring on the current reading is what stops
       // the same rise being announced again on every call for a whole window.
       windows.set(id, [{ at, h: humidity, t: temperature }]);
-      return { baseline: anchor.h, gain, tempGain, sinceMs: at - anchor.at };
+      return { baseline: anchor.h, gain, tempGain, sinceMs: at - anchor.at, risePts: roomRise };
     },
 
     forget(id: string): void {
