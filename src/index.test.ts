@@ -10,6 +10,8 @@ import {
   findPowerOrderAlias,
   isMotionDetected,
   minutesUntil,
+  median,
+  showerBar,
 } from "./index.js";
 
 // ============================================================
@@ -1053,6 +1055,12 @@ describe("showers", () => {
     h.emit("room-1", "humidity", humidity);
   };
 
+  /** The room comes back down — both readings, as a real bathroom does. */
+  const dried = (h: ReturnType<typeof makeCtx>, humidity = 52.5, temperature = 20.5) => {
+    h.emit("room-1", "temperature", temperature);
+    h.emit("room-1", "humidity", humidity);
+  };
+
   it("starts well under the maximum, and stops once the room is back where it was", () => {
     const h = bathroom(52, 20.5);
     const inst = createRecipe().createInstance(showerParams, h.ctx as never);
@@ -1247,6 +1255,134 @@ describe("showers", () => {
     inst.stop();
   });
 
+  it("fits its bar on what showers actually do to each room", () => {
+    // Two bathrooms, the same shower: the probe over the door sees six points,
+    // the one beside the shower sees twenty-four. One bar cannot serve both.
+    expect(showerBar([], 4)).toBe(4); // nothing measured yet: the configured bar
+    expect(showerBar([24], 4)).toBe(4); // one shower is an anecdote
+    expect(showerBar([24, 22], 4)).toBe(8);
+    expect(showerBar([6, 7], 4)).toBe(3); // floored: below that lies the weather
+    expect(showerBar([60, 70], 4)).toBe(15); // capped
+    expect(median([3, 1, 2])).toBe(2);
+    expect(median([4, 1, 2, 3])).toBe(2.5);
+  });
+
+  it("raises the bar in a room whose showers are violent", () => {
+    const h = bathroom(52, 20.5);
+    const inst = createRecipe().createInstance(showerParams, h.ctx as never);
+
+    // Two showers, each taking the room 24 points up and back down again.
+    for (let i = 0; i < 2; i++) {
+      vi.advanceTimersByTime(10 * 60_000);
+      shower(h, 76, 22.4);
+      vi.advanceTimersByTime(30 * 60_000);
+      dried(h);
+    }
+    expect(h.logs.some((l) => l.includes("seuil de détection"))).toBe(true);
+    expect(h.state.get("showerAmplitudes")).toContain("room-1");
+
+    // The bar now sits at ~8 points: a four-point rise no longer counts.
+    const before = vmcOrders(h.orders).length;
+    vi.advanceTimersByTime(10 * 60_000);
+    shower(h, 57, 21.5);
+    expect(vmcOrders(h.orders)).toHaveLength(before);
+
+    // A real one still does.
+    vi.advanceTimersByTime(10 * 60_000);
+    shower(h, 68, 22.6);
+    expect(vmcOrders(h.orders).length).toBeGreaterThan(before);
+    inst.stop();
+  });
+
+  it("keeps each room's bar to itself", () => {
+    const h = makeCtx({
+      rooms: [
+        { id: "room-1", name: "SDB haut", humidity: 52, temperature: 20.5 },
+        { id: "room-2", name: "SDB bas", humidity: 52, temperature: 20.5 },
+      ],
+    });
+    const inst = createRecipe().createInstance(
+      { ...showerParams, sensors: ["room-1", "room-2"] },
+      h.ctx as never,
+    );
+
+    // Only the upstairs bathroom ever shows big rises.
+    for (let i = 0; i < 2; i++) {
+      vi.advanceTimersByTime(10 * 60_000);
+      h.emit("room-1", "temperature", 22.4);
+      h.emit("room-1", "humidity", 76);
+      vi.advanceTimersByTime(30 * 60_000);
+      h.emit("room-1", "temperature", 20.5);
+      h.emit("room-1", "humidity", 52.5);
+    }
+
+    // Downstairs still answers a modest rise — its bar never moved.
+    const before = vmcOrders(h.orders).length;
+    vi.advanceTimersByTime(10 * 60_000);
+    h.emit("room-2", "temperature", 21.5);
+    h.emit("room-2", "humidity", 57);
+    expect(vmcOrders(h.orders).length).toBeGreaterThan(before);
+    expect(h.logs.some((l) => l.includes("SDB bas"))).toBe(true);
+    inst.stop();
+  });
+
+  it("remembers what it learned across a recipe update", () => {
+    const h = bathroom(52, 20.5);
+    const first = createRecipe().createInstance(showerParams, h.ctx as never);
+    for (let i = 0; i < 2; i++) {
+      vi.advanceTimersByTime(10 * 60_000);
+      shower(h, 76, 22.4);
+      vi.advanceTimersByTime(30 * 60_000);
+      dried(h);
+    }
+    first.stop();
+
+    const second = createRecipe().createInstance(showerParams, h.ctx as never);
+    // The learned bar survived: a six-point rise is not a shower here.
+    const before = vmcOrders(h.orders).length;
+    vi.advanceTimersByTime(10 * 60_000);
+    shower(h, 58, 21.5);
+    expect(vmcOrders(h.orders)).toHaveLength(before);
+    second.stop();
+  });
+
+  it("does not learn from a cycle that never came back", () => {
+    const h = bathroom(52, 20.5);
+    const inst = createRecipe().createInstance(
+      { ...showerParams, showerMaxRun: "1h" },
+      h.ctx as never,
+    );
+    vi.advanceTimersByTime(10 * 60_000);
+    shower(h, 76, 22.4);
+    vi.advanceTimersByTime(62 * 60_000); // the room never dries: capped out
+    expect(h.logs.some((l) => l.includes("sans revenir à"))).toBe(true);
+    expect(h.state.get("showerAmplitudes")).toBeUndefined();
+    inst.stop();
+  });
+
+  it("takes the configured starting bar", () => {
+    const h = bathroom(52, 20.5);
+    const inst = createRecipe().createInstance(
+      { ...showerParams, showerRise: 10 },
+      h.ctx as never,
+    );
+    vi.advanceTimersByTime(10 * 60_000);
+    shower(h, 60, 21.5); // +8, under the configured 10
+    expect(vmcOrders(h.orders)).toEqual([]);
+
+    vi.advanceTimersByTime(10 * 60_000);
+    shower(h, 64, 22.0); // +12 from the same baseline
+    expect(vmcOrders(h.orders)).toEqual([true]);
+    inst.stop();
+  });
+
+  it("rejects a shower rise under two points", () => {
+    const { ctx } = makeCtx();
+    expect(() =>
+      createRecipe().validate({ ...baseParams, showerRise: 1 }, ctx as never),
+    ).toThrow(/rise/i);
+  });
+
   it("rejects a shower cap that is not a duration", () => {
     const { ctx } = makeCtx();
     expect(() =>
@@ -1312,7 +1448,7 @@ describe("form shape", () => {
     // A group of three renders in ~120 px cells: a label that wraps pushes its
     // field down and the row stops lining up. Groups that never exceed two
     // columns get twice the width.
-    const THREE_COL_GROUPS = new Set(["thresholds", "motion", "limits"]);
+    const THREE_COL_GROUPS = new Set(["thresholds", "motion", "limits", "shower"]);
     const r = createRecipe();
     for (const slot of r.slots) {
       if (!slot.group || slot.list) continue;
@@ -1327,7 +1463,7 @@ describe("form shape", () => {
     // The help sits under its field in the same cell: ~20 characters fit on a
     // line in a three-column row, ~30 in a two-column one. Beyond that it
     // wraps and the group turns into a wall of grey text.
-    const THREE_COL_GROUPS = new Set(["thresholds", "motion", "limits"]);
+    const THREE_COL_GROUPS = new Set(["thresholds", "motion", "limits", "shower"]);
     const r = createRecipe();
     for (const slot of r.slots) {
       if (!slot.group) continue;
