@@ -5,7 +5,8 @@ actually serves.
 
 > When a supervised room passes the maximum humidity the ventilation starts and
 > runs until **every** room is back under target — unless the outdoor air is too
-> wet to dry them.
+> wet to dry them. A **shower** is answered before any threshold is crossed, and
+> runs until the room is back to the humidity it had before it.
 
 ## The heart of it: the psychrometric floor
 
@@ -41,6 +42,52 @@ erases the last good one.
 Every start and stop states the numbers it acted on — `SDB à 64.7 % (plancher
 54.6 %, gain 10.1 pts)` — so a decision can be re-read months later without
 replaying InfluxDB against the sensors' own sampling.
+
+## Showers
+
+A shower never trips the thresholds in time. By the time the bathroom crosses
+60 % the vapour has been on the walls for a quarter of an hour, and the cycle
+that follows stops at the target — which may be well above where the room
+actually was.
+
+So a shower is detected, not waited for, and what names it is the
+**correlation**:
+
+| What moves             | Humidity | Temperature | Verdict    |
+| ---------------------- | -------- | ----------- | ---------- |
+| Someone showers        | ↑ fast   | ↑           | **shower** |
+| Weather, a wet evening | ↑ slow   | flat        | ignored    |
+| The heating comes on   | ↓        | ↑           | ignored    |
+
+Concretely: **+4 points of relative humidity and +0.5 °C within 45 minutes**,
+measured against the driest reading of that window — not against the previous
+one, so a probe reporting every 30 min and one reporting every minute are
+judged the same way. The room needs a temperature probe; one that reports
+humidity only falls back to the plain thresholds, and the recipe says so at
+startup.
+
+What follows is a **drying cycle**, not a normal one:
+
+- it targets the humidity the room had **before** the shower (+1 point — the
+  last point is asymptotic), never the configured target;
+- it runs at the high speed while the room is over `humidityMax`, then at the
+  low one to finish;
+- it **starts inside the quiet window**. A bathroom left saturated at 23:00 is
+  still wet at 07:00, and the noise costs less than the mould;
+- it stops early if the outdoor air is wetter than the room — no run time beats
+  the psychrometry;
+- it gives up after `showerMaxRun` (1 h by default) rather than running all
+  night on a room that will not come back;
+- a second shower on the same room extends the cycle and keeps the **first**
+  baseline: the level to come back to is the one before anybody ran the water.
+
+It stands down for the same reasons everything else does: a ventilation cut by
+hand, or a maximum-run cooldown, blocks the start and says so in the journal.
+
+The detector itself lives in [`src/shower-detector.ts`](src/shower-detector.ts)
+— a self-contained module with no Sowel types in it, meant to be copied as-is
+by any other recipe needing the same signal (`sowel-recipe-water-heater-smart`
+counts showers to bill the tank).
 
 ## ⚠️ One recipe per ventilation
 
@@ -103,6 +150,8 @@ the value is re-read on every evaluation.
 | `motionConfirm`                   | 1 min   | Sustained motion required before starting                         |
 | `motionRunAfter`                  | 15 min  | Extra run after the last detection                                |
 | `motionMaxRun`                    | 45 min  | Cap of an occupancy cycle (then a 30 min pause)                   |
+| `showerMode`                      | Yes     | Detect showers and dry the room back to its pre-shower level      |
+| `showerMaxRun`                    | 1 h     | Cap of a drying cycle                                             |
 
 ## The ventilation can be driven by something else
 

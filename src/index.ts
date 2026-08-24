@@ -28,9 +28,23 @@
 // recipe falls back to the raw RH comparison; without an outdoor sensor at
 // all it is a plain max/min hysteresis.
 //
+// A shower is the one event those thresholds answer too late: by the time
+// the room crosses `humidityMax` the vapour has been on the walls for a
+// quarter of an hour. It is named by the correlation — humidity climbing
+// WITH the room's own temperature — and then answered on its own terms: the
+// ventilation runs until the room is back to the humidity it had before the
+// shower, and the quiet window does not hold that one back.
+//
 // Orders are sent on TRANSITIONS only — a manual change in between is never
 // overridden until the next transition.
 // ============================================================
+
+import {
+  createShowerDetector,
+  SHOWER_RISE_PTS,
+  SHOWER_TEMP_RISE_C,
+  type ShowerHit,
+} from "./shower-detector.js";
 
 // ============================================================
 // Types (mirrored from Sowel core — recipe packages don't import core)
@@ -170,6 +184,11 @@ const QUIET_ENFORCE_GAP_MS = 5 * 60_000;
 /** Someone cutting the ventilation by hand is an instruction: stand down. */
 const MANUAL_OVERRIDE_BLOCK_MS = 60 * 60_000;
 
+/** How close to its pre-shower level a room must come back before the drying
+ *  cycle ends. Exactly is asymptotic: the last point costs longer than the
+ *  first three. */
+const SHOWER_RECOVERY_PTS = 1;
+
 const SENSOR_TYPES = ["sensor", "weather", "thermostat", "heater", "camera"];
 const VMC_TYPES = ["switch", "appliance", "vmc"];
 const MOTION_TYPES = ["sensor", "camera"];
@@ -272,6 +291,14 @@ export function isMotionDetected(value: unknown): boolean {
  */
 export function flagOn(value: unknown): boolean {
   return value === true || value === "on" || value === "true";
+}
+
+/**
+ * Shower detection is on unless it is explicitly turned off: instances written
+ * before it existed carry no flag at all and get the behaviour.
+ */
+export function isShowerEnabled(params: Record<string, unknown>): boolean {
+  return params.showerMode === undefined || flagOn(params.showerMode);
 }
 
 /**
@@ -446,6 +473,32 @@ function buildSlots(): RecipeSlotDef[] {
       group: "motion",
     },
 
+    // ── Shower ────────────────────────────────────────────────
+    {
+      id: "showerMode",
+      name: "Shower",
+      description: "Extract on a detected shower",
+      type: "select",
+      required: false,
+      defaultValue: "on",
+      options: [
+        { value: "on", label: "Yes" },
+        { value: "off", label: "No" },
+      ],
+      group: "shower",
+    },
+    {
+      id: "showerMaxRun",
+      name: "Shower max",
+      description: "Cap of a drying cycle",
+      type: "duration",
+      required: false,
+      defaultValue: "1h",
+      // Deliberately not hidden when the detection is off: the group would
+      // drop to a single field and leave a hole in the grid row.
+      group: "shower",
+    },
+
     // ── Guards ────────────────────────────────────────────────
     {
       id: "minRun",
@@ -522,7 +575,7 @@ function buildSlots(): RecipeSlotDef[] {
 const I18N_FR: RecipeLangPack = {
   name: "VMC hygro-pilotée",
   description:
-    "Démarre la VMC quand une pièce dépasse l'humidité maximale et la maintient jusqu'à ce que toutes soient sous la cible. Tient compte de l'air extérieur : ventiler n'assèche que si l'air du dehors, réchauffé à la température intérieure, est plus sec. Peut aussi extraire sur détection de présence (WC). À utiliser seule sur une VMC — une autre recette sur le même équipement entrerait en conflit.",
+    "Démarre la VMC quand une pièce dépasse l'humidité maximale et la maintient jusqu'à ce que toutes soient sous la cible. Tient compte de l'air extérieur : ventiler n'assèche que si l'air du dehors, réchauffé à la température intérieure, est plus sec. Détecte les douches — l'humidité qui monte en même temps que la température — et ventile jusqu'à ce que la pièce retrouve son taux d'avant la douche, même en plage silencieuse. Peut aussi extraire sur détection de présence (WC). À utiliser seule sur une VMC — une autre recette sur le même équipement entrerait en conflit.",
   slots: {
     zone: { name: "Zone", description: "Zone de la VMC" },
     sensors: { name: "Sondes d'humidité", description: "Pièces desservies par la VMC" },
@@ -552,6 +605,13 @@ const I18N_FR: RecipeLangPack = {
     motionRunAfter: { name: "Prolongation", description: "Après la détection" },
     motionMaxRun: { name: "Maxi présence", description: "Puis 30 min de pause" },
 
+    showerMode: {
+      name: "Douche",
+      description: "Extraction sur douche détectée",
+      options: { on: "Oui", off: "Non" },
+    },
+    showerMaxRun: { name: "Maxi séchage", description: "Plafond d'un cycle douche" },
+
     minRun: { name: "Marche mini", description: "Anti court-cycle" },
     maxRun: { name: "Marche maxi", description: "Arrêt forcé + repos" },
     quietMode: {
@@ -573,6 +633,7 @@ const I18N_FR: RecipeLangPack = {
     thresholds: "Seuils d'humidité",
     outdoor: "Air extérieur",
     motion: "Présence (WC)",
+    shower: "Douche",
     limits: "Garde-fous",
   },
 };
@@ -636,7 +697,7 @@ export function createRecipe(): RecipeDefinition {
     id: "vmc-humidity",
     name: "VMC Humidity Control",
     description:
-      "Starts the ventilation when a room rises above the maximum humidity and keeps it running until every room is back under the target. Accounts for outdoor air: ventilating only dries when the outside air, warmed to the indoor temperature, is drier. Optional motion sensors also extract on use (toilets). Use it alone on a ventilation — another recipe on the same equipment would fight it.",
+      "Starts the ventilation when a room rises above the maximum humidity and keeps it running until every room is back under the target. Accounts for outdoor air: ventilating only dries when the outside air, warmed to the indoor temperature, is drier. Detects showers — humidity climbing together with the temperature — and ventilates until the room is back to its pre-shower level, quiet window included. Optional motion sensors also extract on use (toilets). Use it alone on a ventilation — another recipe on the same equipment would fight it.",
 
     slots: buildSlots(),
 
@@ -763,6 +824,13 @@ export function createRecipe(): RecipeDefinition {
           throw new Error("Occupancy confirmation must be shorter than the occupancy maximum");
         }
       }
+
+      if (isShowerEnabled(params)) {
+        const showerMax = ctx.helpers.parseDuration(params.showerMaxRun ?? "1h");
+        if (!(showerMax > 0)) {
+          throw new Error("Shower drying cap must be positive (e.g. 1h)");
+        }
+      }
     },
 
     // ============================================================
@@ -808,6 +876,8 @@ export function createRecipe(): RecipeDefinition {
       const motionConfirmMs = ctx.helpers.parseDuration(params.motionConfirm ?? "1m");
       const motionRunAfterMs = ctx.helpers.parseDuration(params.motionRunAfter ?? "15m");
       const motionMaxRunMs = ctx.helpers.parseDuration(params.motionMaxRun ?? "45m");
+      const showerEnabled = isShowerEnabled(params);
+      const showerMaxRunMs = ctx.helpers.parseDuration(params.showerMaxRun ?? "1h");
 
       // ── Resolve equipments and aliases once ─────────────────
       const vmcEq = ctx.equipmentManager.getByIdWithDetails(vmcId);
@@ -1148,6 +1218,71 @@ export function createRecipe(): RecipeDefinition {
         return { lastAt, confirmedBy };
       };
 
+      // ── Shower detection ────────────────────────────────────
+      // The detector itself lives in `shower-detector.ts`: it knows nothing of
+      // Sowel, so it can be copied as-is into any other recipe that needs the
+      // same signal. What stays here is the policy — what a shower is worth.
+      const showerDetector = createShowerDetector();
+
+      interface ShowerCycle {
+        /** Kept here rather than read back from the equipment: the log has to
+         *  name the room even if its sensor disappears mid-cycle. */
+        name: string;
+        /** Humidity the room must come back to — its level before the shower. */
+        target: number;
+        startedAt: number;
+      }
+      /** One entry per room still drying out. */
+      const showerCycles = new Map<string, ShowerCycle>();
+
+      /**
+       * A drying cycle outlives the instance, like the stand-down deadlines
+       * above: a recipe update in the middle of a shower would otherwise leave
+       * a saturated bathroom with nothing running.
+       */
+      const restoreShowerCycles = () => {
+        const raw = ctx.state.get("showerCycles");
+        if (typeof raw !== "string" || !raw) return;
+        try {
+          const parsed: unknown = JSON.parse(raw);
+          if (!Array.isArray(parsed)) return;
+          for (const entry of parsed) {
+            if (!Array.isArray(entry) || entry.length !== 2) continue;
+            const [id, cycle] = entry as [unknown, Partial<ShowerCycle>];
+            if (typeof id !== "string" || !cycle) continue;
+            if (typeof cycle.target !== "number" || typeof cycle.startedAt !== "number") continue;
+            showerCycles.set(id, {
+              name: typeof cycle.name === "string" ? cycle.name : id.slice(0, 8),
+              target: cycle.target,
+              startedAt: cycle.startedAt,
+            });
+          }
+        } catch {
+          // A state entry we cannot read is not worth a crash — the worst case
+          // is a bathroom that falls back to the plain humidity thresholds.
+        }
+      };
+      restoreShowerCycles();
+
+      const saveShowerCycles = () => {
+        putState("showerCycles", JSON.stringify([...showerCycles.entries()]));
+      };
+
+      /** Feed every fresh room to the detector, and collect what it names. */
+      const pollShowers = (now: number): Array<{ room: Room; hit: ShowerHit }> => {
+        const hits: Array<{ room: Room; hit: ShowerHit }> = [];
+        for (const r of rooms) {
+          if (r.humidity === null || now - r.humidityAt > STALE_READING_MS) continue;
+          const hit = showerDetector.sample(r.id, {
+            at: now,
+            humidity: r.humidity,
+            temperature: r.temperature,
+          });
+          if (hit !== null) hits.push({ room: r, hit });
+        }
+        return hits;
+      };
+
       const fmt = (ms: number) => ctx.helpers.formatDuration(ms);
 
       const startHumidityRun = (why: string) => {
@@ -1202,6 +1337,108 @@ export function createRecipe(): RecipeDefinition {
           ctx.log(`Occupation confirmée (${confirmedBy}) — extraction`);
         }
         putState("motionRunning", motionRunning);
+
+        // ══ Shower cycle (bathrooms) ══════════════════════════
+        // A shower is answered on its own terms. Not "run until 50 %" — a
+        // bathroom that sat at 46 % before someone showered is not dry at 50 %
+        // — but "run until the room is back where it was". And it is the one
+        // demand the quiet window does not hold back: a bathroom left
+        // saturated at 23:00 is still wet at 07:00, and the extra minutes cost
+        // less noise than a night of condensation costs in mould.
+        if (showerEnabled) {
+          for (const { room, hit } of pollShowers(now)) {
+            const rh = room.humidity as number;
+            const floor = ventilationFloor(
+              outdoorHumidity,
+              outdoorTemp,
+              room.temperature ?? ASSUMED_INDOOR_TEMP,
+            );
+            const gained = round1(hit.gain);
+            const existing = showerCycles.get(room.id);
+            if (floor !== null && rh <= floor) {
+              // The outdoor drying margin is deliberately NOT applied here: a
+              // shower is a known event, not a marginal call. What does still
+              // apply is the physics — air wetter than the room adds water,
+              // and no amount of run time fixes that.
+              ctx.log(
+                `Douche détectée (${room.name}, +${gained} pts) — rien à extraire, l'air extérieur est plus humide (plancher ${round1(floor)} %)`,
+              );
+            } else if (existing !== undefined) {
+              // A second shower in the same room: the level to come back to is
+              // still the one before anybody ran the water, so the target
+              // stands — but the cap gets its full time again.
+              existing.startedAt = now;
+              ctx.log(`Nouvelle douche (${room.name}, +${gained} pts) — séchage prolongé`);
+            } else if (now < blockedUntil) {
+              // Someone cut the ventilation by hand, or the maximum run time
+              // just forced it off. Both are instructions; say what was
+              // skipped rather than arguing with them in silence.
+              ctx.log(
+                `Douche détectée (${room.name}, +${gained} pts) — VMC au repos jusqu'à ${new Date(blockedUntil).toLocaleTimeString("fr-FR")}, pas de séchage`,
+                "warn",
+              );
+            } else {
+              const target = round1(hit.baseline + SHOWER_RECOVERY_PTS);
+              showerCycles.set(room.id, { name: room.name, target, startedAt: now });
+              ctx.log(
+                `Douche détectée (${room.name}) — ${round1(rh)} % (+${gained} pts avec +${round1(hit.tempGain)} °C), séchage jusqu'à ${target} %`,
+              );
+            }
+          }
+
+          for (const [id, cycle] of [...showerCycles]) {
+            const room = rooms.find((r) => r.id === id);
+            const rh = room?.humidity ?? null;
+            if (room === undefined || rh === null || now - room.humidityAt > STALE_READING_MS) {
+              showerCycles.delete(id);
+              ctx.log(`Séchage ${cycle.name} arrêté — plus de mesure d'humidité`, "warn");
+              continue;
+            }
+            const floor = ventilationFloor(
+              outdoorHumidity,
+              outdoorTemp,
+              room.temperature ?? ASSUMED_INDOOR_TEMP,
+            );
+            if (rh <= cycle.target) {
+              showerCycles.delete(id);
+              ctx.log(
+                `Séchage ${cycle.name} terminé — ${round1(rh)} %, niveau d'avant la douche retrouvé en ${fmt(now - cycle.startedAt)}`,
+              );
+            } else if (floor !== null && rh <= floor) {
+              showerCycles.delete(id);
+              ctx.log(
+                `Séchage ${cycle.name} arrêté à ${round1(rh)} % — l'air extérieur ne peut pas faire mieux (plancher ${round1(floor)} %)`,
+              );
+            } else if (now - cycle.startedAt >= showerMaxRunMs) {
+              showerCycles.delete(id);
+              ctx.log(
+                `Séchage ${cycle.name} arrêté — ${fmt(showerMaxRunMs)} sans revenir à ${round1(cycle.target)} % (encore ${round1(rh)} %)`,
+                "warn",
+              );
+            }
+          }
+        } else if (showerCycles.size > 0) {
+          // The option was turned off under a running cycle.
+          for (const id of showerCycles.keys()) showerDetector.forget(id);
+          showerCycles.clear();
+        }
+
+        const showerRunning = showerCycles.size > 0;
+        // The vapour is on the walls: give a shower the high speed for as long
+        // as the room is still over the maximum, then the low one to finish.
+        let showerHigh = false;
+        for (const id of showerCycles.keys()) {
+          const room = rooms.find((r) => r.id === id);
+          if (room === undefined || room.humidity === null) continue;
+          if (room.humidity >= humidityMax) showerHigh = true;
+        }
+        const showerDetail = showerRunning
+          ? `Séchage après douche — ${[...showerCycles.values()]
+              .map((c) => `${c.name} → ${c.target} %`)
+              .join(", ")}`
+          : "";
+        putState("showerRunning", showerRunning);
+        saveShowerCycles();
 
         // ══ Humidity cycle ════════════════════════════════════
         let status = "idle";
@@ -1397,9 +1634,15 @@ export function createRecipe(): RecipeDefinition {
         }
 
         // ══ Outputs ═══════════════════════════════════════════
-        const extraction = running || motionRunning;
-        const why = running ? detail : motionRunning ? "occupation détectée" : detail;
-        applyOutputs(extraction, highDemand, why);
+        const extraction = running || motionRunning || showerRunning;
+        const why = showerRunning
+          ? showerDetail
+          : running
+            ? detail
+            : motionRunning
+              ? "occupation détectée"
+              : detail;
+        applyOutputs(extraction, highDemand || showerHigh, why);
 
         // ══ Silence is a promise, not a preference ════════════
         // The recipe stopping at 22:00 is not enough: anything else that
@@ -1422,7 +1665,12 @@ export function createRecipe(): RecipeDefinition {
           return;
         }
 
-        if (motionRunning) {
+        if (showerRunning) {
+          setStatus(
+            "shower",
+            showerDetail + (running ? " + humidité" : "") + (motionRunning ? " + occupation" : ""),
+          );
+        } else if (motionRunning) {
           setStatus(
             running ? "running" : "motion",
             running
@@ -1509,6 +1757,7 @@ export function createRecipe(): RecipeDefinition {
 
       putState("running", false);
       putState("motionRunning", false);
+      putState("showerRunning", showerCycles.size > 0);
 
       ctx.log(
         `VMC hygro-pilotée démarrée (${rooms.length} pièce(s), max ${humidityMax} %, cible ${humidityMin} %` +
@@ -1518,11 +1767,30 @@ export function createRecipe(): RecipeDefinition {
           (motionSensors.length > 0
             ? `, ${motionSensors.length} détecteur(s) (confirmation ${fmt(motionConfirmMs)}, prolongation ${fmt(motionRunAfterMs)})`
             : "") +
+          (showerEnabled
+            ? `, détection douche (+${SHOWER_RISE_PTS} pts avec +${SHOWER_TEMP_RISE_C} °C, séchage maxi ${fmt(showerMaxRunMs)})`
+            : "") +
           (quietEnabled
             ? `, silence ${String(params.quietStart ?? "22:00")}–${String(params.quietEnd ?? "07:00")}${quietScope === "humidity" ? " (humidité seulement)" : ""}`
             : "") +
           ")",
       );
+
+      if (showerEnabled && rooms.every((r) => r.tempAlias === null)) {
+        // Humidity alone cannot tell a shower from the weather, and this
+        // recipe will not guess: without a temperature the rooms fall back to
+        // the plain thresholds, and it says so rather than looking broken.
+        ctx.log(
+          "Détection de douche inactive : aucune sonde ne remonte la température de sa pièce.",
+          "warn",
+        );
+      }
+
+      if (quietEnabled && showerEnabled) {
+        ctx.log(
+          "Plage silencieuse : une douche détectée démarrera quand même la VMC, le temps de faire redescendre l'humidité.",
+        );
+      }
 
       if (quietEnabled) {
         // Two recipes driving the same VMC each own the equipment: whichever
