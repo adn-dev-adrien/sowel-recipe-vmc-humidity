@@ -479,7 +479,7 @@ describe("run-time guards", () => {
     // anti short-cycling guard was checked first.
     const h = makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity: 65, temperature: 21 }] });
     const inst = createRecipe().createInstance(
-      { ...baseParams, quietMode: "on", quietStart: "10:10", quietEnd: "07:00" },
+      { ...baseParams, showerMode: "off", quietMode: "on", quietStart: "10:10", quietEnd: "07:00" },
       h.ctx as never,
     );
     expect(vmcOrders(h.orders)).toEqual([true]); // 10:00, outside the window
@@ -490,10 +490,13 @@ describe("run-time guards", () => {
     inst.stop();
   });
 
+  // A one-jump step to 65 % or 70 % is what a shower looks like, and a shower
+  // is deliberately exempt from the quiet window. These three guards are about
+  // the humidity cycle, so they turn the detection off and keep asserting it.
   it("still starts a useful cycle right before the window, then ends it on time", () => {
     const h = makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity: 45, temperature: 21 }] });
     const inst = createRecipe().createInstance(
-      { ...baseParams, quietMode: "on", quietStart: "10:01", quietEnd: "07:00" },
+      { ...baseParams, showerMode: "off", quietMode: "on", quietStart: "10:01", quietEnd: "07:00" },
       h.ctx as never,
     );
     h.emit("room-1", "humidity", 70); // 10:00 — a minute of extraction is still worth having
@@ -508,7 +511,7 @@ describe("run-time guards", () => {
   it("refuses every restart for the whole window without stalling", () => {
     const h = makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity: 45, temperature: 21 }] });
     const inst = createRecipe().createInstance(
-      { ...baseParams, quietMode: "on", quietStart: "10:10", quietEnd: "07:00" },
+      { ...baseParams, showerMode: "off", quietMode: "on", quietStart: "10:10", quietEnd: "07:00" },
       h.ctx as never,
     );
     vi.advanceTimersByTime(11 * 60_000); // inside the window
@@ -532,7 +535,7 @@ describe("run-time guards", () => {
   it("never starts during the quiet window and cuts a running cycle short", () => {
     const h = makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity: 65, temperature: 21 }] });
     // Quiet from 10:10 to 07:00 — the instance starts at 10:00, just before.
-    const params = { ...baseParams, quietMode: "on", quietStart: "10:10", quietEnd: "07:00" };
+    const params = { ...baseParams, showerMode: "off", quietMode: "on", quietStart: "10:10", quietEnd: "07:00" };
     const inst = createRecipe().createInstance(params, h.ctx as never);
     expect(vmcOrders(h.orders)).toEqual([true]); // 10:00, not quiet yet
 
@@ -1049,13 +1052,17 @@ describe("showers", () => {
   const bathroom = (humidity: number, temperature: number) =>
     makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity, temperature }] });
 
-  /** Run the water: humidity and temperature climb together. */
-  const shower = (h: ReturnType<typeof makeCtx>, humidity: number, temperature: number) => {
+  /**
+   * Run the water. The temperature stays where it was on purpose: that is the
+   * August case that broke v0.7.1 — a bathroom already at 24.7 °C gains no
+   * measurable degree, and only the added water names the shower.
+   */
+  const shower = (h: ReturnType<typeof makeCtx>, humidity: number, temperature = 20.5) => {
     h.emit("room-1", "temperature", temperature);
     h.emit("room-1", "humidity", humidity);
   };
 
-  /** The room comes back down — both readings, as a real bathroom does. */
+  /** The room comes back down. */
   const dried = (h: ReturnType<typeof makeCtx>, humidity = 52.5, temperature = 20.5) => {
     h.emit("room-1", "temperature", temperature);
     h.emit("room-1", "humidity", humidity);
@@ -1067,7 +1074,7 @@ describe("showers", () => {
     expect(vmcOrders(h.orders)).toEqual([]);
 
     vi.advanceTimersByTime(10 * 60_000);
-    shower(h, 68, 22.4); // 68 % is nowhere near the 85 % maximum
+    shower(h, 68); // 68 % is nowhere near the 85 % maximum
     expect(vmcOrders(h.orders)).toEqual([true]);
     expect(h.state.get("showerRunning")).toBe(true);
     expect(h.state.get("status")).toBe("shower");
@@ -1082,7 +1089,7 @@ describe("showers", () => {
     h.emit("room-1", "humidity", 53);
     expect(vmcOrders(h.orders)).toEqual([true, false]);
     expect(h.state.get("showerRunning")).toBe(false);
-    expect(h.logs.some((l) => l.includes("niveau d'avant la douche retrouvé"))).toBe(true);
+    expect(h.logs.some((l) => l.includes("niveau d'avant la douche"))).toBe(true);
     inst.stop();
   });
 
@@ -1108,7 +1115,7 @@ describe("showers", () => {
     );
     vi.advanceTimersByTime(20 * 60_000); // inside the window
 
-    shower(h, 68, 22.4);
+    shower(h, 68);
     expect(vmcOrders(h.orders)).toEqual([true]);
     expect(h.state.get("status")).toBe("shower");
 
@@ -1130,7 +1137,7 @@ describe("showers", () => {
       h.ctx as never,
     );
     vi.advanceTimersByTime(10 * 60_000);
-    shower(h, 68, 22.4);
+    shower(h, 68);
     expect(vmcOrders(h.orders)).toEqual([true]);
 
     // The room barely moves — a window left open, a wet towel, a dead sensor
@@ -1155,7 +1162,7 @@ describe("showers", () => {
       h.ctx as never,
     );
     vi.advanceTimersByTime(10 * 60_000);
-    shower(h, 72, 22.4);
+    shower(h, 72);
     expect(vmcOrders(h.orders)).toEqual([true]);
     expect(boostOrders(h.orders)).toEqual([true]);
 
@@ -1178,7 +1185,7 @@ describe("showers", () => {
       h.ctx as never,
     );
     vi.advanceTimersByTime(10 * 60_000);
-    shower(h, 68, 22.4);
+    shower(h, 68);
     expect(vmcOrders(h.orders)).toEqual([]);
     expect(h.logs.some((l) => l.includes("rien à extraire"))).toBe(true);
     inst.stop();
@@ -1188,7 +1195,7 @@ describe("showers", () => {
     const h = bathroom(52, 20.5);
     const first = createRecipe().createInstance(showerParams, h.ctx as never);
     vi.advanceTimersByTime(10 * 60_000);
-    shower(h, 68, 22.4);
+    shower(h, 68);
     expect(vmcOrders(h.orders)).toEqual([true]);
     first.stop();
 
@@ -1209,7 +1216,7 @@ describe("showers", () => {
       h.ctx as never,
     );
     vi.advanceTimersByTime(10 * 60_000);
-    shower(h, 68, 22.4);
+    shower(h, 68);
     expect(vmcOrders(h.orders)).toEqual([]);
     expect(h.state.get("showerRunning")).toBe(false);
     inst.stop();
@@ -1226,7 +1233,7 @@ describe("showers", () => {
     expect(h.state.get("status")).toBe("cooldown");
 
     vi.advanceTimersByTime(10 * 60_000);
-    shower(h, 78, 22.4);
+    shower(h, 78);
     expect(vmcOrders(h.orders)).toEqual([true]); // still standing down
     expect(h.logs.some((l) => l.includes("VMC au repos"))).toBe(true);
     inst.stop();
@@ -1236,11 +1243,11 @@ describe("showers", () => {
     const h = bathroom(52, 20.5);
     const inst = createRecipe().createInstance(showerParams, h.ctx as never);
     vi.advanceTimersByTime(10 * 60_000);
-    shower(h, 64, 21.5);
+    shower(h, 64);
     expect(h.state.get("showerRunning")).toBe(true);
 
     vi.advanceTimersByTime(20 * 60_000);
-    shower(h, 74, 22.6); // someone else showers before the room is dry
+    shower(h, 74); // someone else showers before the room is dry
     expect(h.logs.some((l) => l.includes("Nouvelle douche"))).toBe(true);
 
     // 55 % would be back under the second shower's floor, but not under the
@@ -1274,7 +1281,7 @@ describe("showers", () => {
     // Two showers, each taking the room 24 points up and back down again.
     for (let i = 0; i < 2; i++) {
       vi.advanceTimersByTime(10 * 60_000);
-      shower(h, 76, 22.4);
+      shower(h, 76);
       vi.advanceTimersByTime(30 * 60_000);
       dried(h);
     }
@@ -1284,12 +1291,12 @@ describe("showers", () => {
     // The bar now sits at ~8 points: a four-point rise no longer counts.
     const before = vmcOrders(h.orders).length;
     vi.advanceTimersByTime(10 * 60_000);
-    shower(h, 57, 21.5);
+    shower(h, 57);
     expect(vmcOrders(h.orders)).toHaveLength(before);
 
     // A real one still does.
     vi.advanceTimersByTime(10 * 60_000);
-    shower(h, 68, 22.6);
+    shower(h, 68);
     expect(vmcOrders(h.orders).length).toBeGreaterThan(before);
     inst.stop();
   });
@@ -1309,17 +1316,14 @@ describe("showers", () => {
     // Only the upstairs bathroom ever shows big rises.
     for (let i = 0; i < 2; i++) {
       vi.advanceTimersByTime(10 * 60_000);
-      h.emit("room-1", "temperature", 22.4);
       h.emit("room-1", "humidity", 76);
       vi.advanceTimersByTime(30 * 60_000);
-      h.emit("room-1", "temperature", 20.5);
       h.emit("room-1", "humidity", 52.5);
     }
 
     // Downstairs still answers a modest rise — its bar never moved.
     const before = vmcOrders(h.orders).length;
     vi.advanceTimersByTime(10 * 60_000);
-    h.emit("room-2", "temperature", 21.5);
     h.emit("room-2", "humidity", 57);
     expect(vmcOrders(h.orders).length).toBeGreaterThan(before);
     expect(h.logs.some((l) => l.includes("SDB bas"))).toBe(true);
@@ -1331,7 +1335,7 @@ describe("showers", () => {
     const first = createRecipe().createInstance(showerParams, h.ctx as never);
     for (let i = 0; i < 2; i++) {
       vi.advanceTimersByTime(10 * 60_000);
-      shower(h, 76, 22.4);
+      shower(h, 76);
       vi.advanceTimersByTime(30 * 60_000);
       dried(h);
     }
@@ -1341,7 +1345,7 @@ describe("showers", () => {
     // The learned bar survived: a six-point rise is not a shower here.
     const before = vmcOrders(h.orders).length;
     vi.advanceTimersByTime(10 * 60_000);
-    shower(h, 58, 21.5);
+    shower(h, 58);
     expect(vmcOrders(h.orders)).toHaveLength(before);
     second.stop();
   });
@@ -1353,7 +1357,7 @@ describe("showers", () => {
       h.ctx as never,
     );
     vi.advanceTimersByTime(10 * 60_000);
-    shower(h, 76, 22.4);
+    shower(h, 76);
     vi.advanceTimersByTime(62 * 60_000); // the room never dries: capped out
     expect(h.logs.some((l) => l.includes("sans revenir à"))).toBe(true);
     expect(h.state.get("showerAmplitudes")).toBeUndefined();
@@ -1367,11 +1371,11 @@ describe("showers", () => {
       h.ctx as never,
     );
     vi.advanceTimersByTime(10 * 60_000);
-    shower(h, 60, 21.5); // +8, under the configured 10
+    shower(h, 60); // +8, under the configured 10
     expect(vmcOrders(h.orders)).toEqual([]);
 
     vi.advanceTimersByTime(10 * 60_000);
-    shower(h, 64, 22.0); // +12 from the same baseline
+    shower(h, 64); // +12 from the same baseline
     expect(vmcOrders(h.orders)).toEqual([true]);
     inst.stop();
   });
@@ -1381,6 +1385,73 @@ describe("showers", () => {
     expect(() =>
       createRecipe().validate({ ...baseParams, showerRise: 1 }, ctx as never),
     ).toThrow(/rise/i);
+  });
+
+  it("answers the two showers of 2026-08-24, quiet window and all", () => {
+    // The regression this whole rewrite exists for. Real readings from the
+    // bathroom that evening: the room gained six points while the temperature
+    // never left 24.7 °C, and v0.7.1 — which demanded half a degree — stayed
+    // silent. The VMC never ran and the room held 60 % until morning.
+    const h = makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity: 53.9, temperature: 24.7 }] });
+    const inst = createRecipe().createInstance(
+      {
+        ...baseParams,
+        humidityMax: 56,
+        humidityMin: 50,
+        quietMode: "on",
+        quietStart: "09:00",
+        quietEnd: "08:00",
+      },
+      h.ctx as never,
+    );
+    expect(h.state.get("status")).toBe("quiet");
+
+    // The sensor reports every 30 min, as it does at home.
+    vi.advanceTimersByTime(30 * 60_000);
+    h.emit("room-1", "humidity", 54.0);
+    vi.advanceTimersByTime(30 * 60_000);
+    h.emit("room-1", "humidity", 54.4);
+    expect(vmcOrders(h.orders)).toEqual([]);
+
+    vi.advanceTimersByTime(30 * 60_000);
+    h.emit("room-1", "humidity", 60.5); // 22:33 — two showers, temperature flat
+    expect(vmcOrders(h.orders)).toEqual([true]);
+    expect(h.state.get("status")).toBe("shower");
+    expect(h.logs.some((l) => l.includes("Douche détectée"))).toBe(true);
+    inst.stop();
+  });
+
+  it("stops at the acceptable target when the room started drier than it", () => {
+    // A bathroom that sat at 46 % has no business being chased back there once
+    // it is under the 50 % its owner called acceptable.
+    const h = makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity: 46, temperature: 20.5 }] });
+    const inst = createRecipe().createInstance(
+      { ...baseParams, humidityMax: 85, humidityMin: 50 },
+      h.ctx as never,
+    );
+    vi.advanceTimersByTime(10 * 60_000);
+    shower(h, 58);
+    expect(vmcOrders(h.orders)).toEqual([true]);
+
+    vi.advanceTimersByTime(20 * 60_000);
+    h.emit("room-1", "humidity", 49.5); // acceptable, still above the 46 it had
+    expect(vmcOrders(h.orders)).toEqual([true, false]);
+    expect(h.logs.some((l) => l.includes("cible 50 %"))).toBe(true);
+    inst.stop();
+  });
+
+  it("caps a drying cycle at 45 minutes by default", () => {
+    const h = bathroom(52, 20.5);
+    const inst = createRecipe().createInstance(showerParams, h.ctx as never);
+    vi.advanceTimersByTime(10 * 60_000);
+    shower(h, 68);
+    expect(vmcOrders(h.orders)).toEqual([true]);
+
+    vi.advanceTimersByTime(44 * 60_000);
+    expect(vmcOrders(h.orders)).toEqual([true]);
+    vi.advanceTimersByTime(2 * 60_000);
+    expect(vmcOrders(h.orders)).toEqual([true, false]);
+    inst.stop();
   });
 
   it("rejects a shower cap that is not a duration", () => {

@@ -39,7 +39,7 @@
 // overridden until the next transition.
 // ============================================================
 
-import { createShowerDetector, SHOWER_TEMP_RISE_C, type ShowerHit } from "./shower-detector.js";
+import { createShowerDetector, psat, type ShowerHit } from "./shower-detector.js";
 
 // ============================================================
 // Types (mirrored from Sowel core — recipe packages don't import core)
@@ -185,6 +185,17 @@ const MANUAL_OVERRIDE_BLOCK_MS = 60 * 60_000;
 const SHOWER_RECOVERY_PTS = 1;
 
 /**
+ * Where a drying cycle stops: whichever comes FIRST between the level the room
+ * held before the shower and the configured target — plus the hard cap on the
+ * run time. A bathroom that sat at 46 % has no reason to be dragged back there
+ * once it is under the 50 % its owner called acceptable, and one that sat at
+ * 58 % has no reason to be chased down to 50 % it never held.
+ */
+export function showerTarget(baseline: number, humidityMin: number): number {
+  return Math.round(Math.max(baseline + SHOWER_RECOVERY_PTS, humidityMin) * 10) / 10;
+}
+
+/**
  * Every bathroom answers a shower differently.
  *
  * Volume, extraction, whether the door was open, and above all where the probe
@@ -208,14 +219,6 @@ const SHOWER_AMPLITUDE_KEEP = 5;
 /** One shower is an anecdote. The starting bar holds until there are two. */
 const SHOWER_AMPLITUDE_MIN = 2;
 
-/**
- * The temperature side stays global on purpose. 0.5 °C is not an amplitude,
- * it is a sign test — "did the room warm up while it got wetter" — sitting
- * just above what a probe reporting in 0.1 steps can resolve. A bathroom where
- * a shower does not raise the temperature by half a degree has a probe that
- * cannot see showers at all, and tuning would only paper over it.
- */
-
 export function median(values: number[]): number {
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
@@ -237,10 +240,10 @@ const MOTION_TYPES = ["sensor", "camera"];
 // Pure helpers (exported for tests)
 // ============================================================
 
-/** Saturation vapour pressure in hPa (Magnus, over water). */
-export function psat(tempC: number): number {
-  return 6.112 * Math.exp((17.62 * tempC) / (243.12 + tempC));
-}
+// The Magnus formula lives in the detector module, which has to stay
+// copy-portable: one implementation for the package, re-exported here because
+// the psychrometric floor below and this recipe's tests both use it.
+export { psat };
 
 /**
  * Outdoor relative humidity expressed at the indoor temperature — the lowest
@@ -543,7 +546,7 @@ function buildSlots(): RecipeSlotDef[] {
       description: "Cap of one cycle",
       type: "duration",
       required: false,
-      defaultValue: "1h",
+      defaultValue: "45m",
       // Deliberately not hidden when the detection is off: the group would
       // drop to a single field and leave a hole in the grid row.
       group: "shower",
@@ -877,7 +880,7 @@ export function createRecipe(): RecipeDefinition {
       }
 
       if (isShowerEnabled(params)) {
-        const showerMax = ctx.helpers.parseDuration(params.showerMaxRun ?? "1h");
+        const showerMax = ctx.helpers.parseDuration(params.showerMaxRun ?? "45m");
         if (!(showerMax > 0)) {
           throw new Error("Shower drying cap must be positive (e.g. 1h)");
         }
@@ -932,7 +935,7 @@ export function createRecipe(): RecipeDefinition {
       const motionRunAfterMs = ctx.helpers.parseDuration(params.motionRunAfter ?? "15m");
       const motionMaxRunMs = ctx.helpers.parseDuration(params.motionMaxRun ?? "45m");
       const showerEnabled = isShowerEnabled(params);
-      const showerMaxRunMs = ctx.helpers.parseDuration(params.showerMaxRun ?? "1h");
+      const showerMaxRunMs = ctx.helpers.parseDuration(params.showerMaxRun ?? "45m");
       const showerRisePts = Number(params.showerRise ?? 4);
 
       // ── Resolve equipments and aliases once ─────────────────
@@ -1488,7 +1491,7 @@ export function createRecipe(): RecipeDefinition {
                 "warn",
               );
             } else {
-              const target = round1(hit.baseline + SHOWER_RECOVERY_PTS);
+              const target = showerTarget(hit.baseline, humidityMin);
               showerCycles.set(room.id, {
                 name: room.name,
                 target,
@@ -1497,7 +1500,7 @@ export function createRecipe(): RecipeDefinition {
                 peak: rh,
               });
               ctx.log(
-                `Douche détectée (${room.name}) — ${round1(rh)} % (+${gained} pts avec +${round1(hit.tempGain)} °C, seuil ${round1(hit.risePts)} pts), séchage jusqu'à ${target} %`,
+                `Douche détectée (${room.name}) — ${round1(rh)} % (+${gained} pts d'eau ajoutée, seuil ${round1(hit.risePts)} pts), séchage jusqu'à ${target} %`,
               );
             }
           }
@@ -1521,7 +1524,11 @@ export function createRecipe(): RecipeDefinition {
             if (rh <= cycle.target) {
               showerCycles.delete(id);
               ctx.log(
-                `Séchage ${cycle.name} terminé — ${round1(rh)} %, niveau d'avant la douche retrouvé en ${fmt(now - cycle.startedAt)}`,
+                `Séchage ${cycle.name} terminé — ${round1(rh)} % en ${fmt(now - cycle.startedAt)} (${
+                  cycle.target > cycle.baseline + SHOWER_RECOVERY_PTS
+                    ? `cible ${humidityMin} %`
+                    : "niveau d'avant la douche"
+                })`,
               );
               recordAmplitude(id, cycle.name, cycle.peak - cycle.baseline);
             } else if (floor !== null && rh <= floor) {
@@ -1892,7 +1899,7 @@ export function createRecipe(): RecipeDefinition {
             ? `, ${motionSensors.length} détecteur(s) (confirmation ${fmt(motionConfirmMs)}, prolongation ${fmt(motionRunAfterMs)})`
             : "") +
           (showerEnabled
-            ? `, détection douche (+${showerRisePts} pts avec +${SHOWER_TEMP_RISE_C} °C, seuil ajusté par pièce, séchage maxi ${fmt(showerMaxRunMs)})`
+            ? `, détection douche (+${showerRisePts} pts d'eau ajoutée, seuil ajusté par pièce, séchage maxi ${fmt(showerMaxRunMs)})`
             : "") +
           (quietEnabled
             ? `, silence ${String(params.quietStart ?? "22:00")}–${String(params.quietEnd ?? "07:00")}${quietScope === "humidity" ? " (humidité seulement)" : ""}`
@@ -1900,12 +1907,14 @@ export function createRecipe(): RecipeDefinition {
           ")",
       );
 
-      if (showerEnabled && rooms.every((r) => r.tempAlias === null)) {
-        // Humidity alone cannot tell a shower from the weather, and this
-        // recipe will not guess: without a temperature the rooms fall back to
-        // the plain thresholds, and it says so rather than looking broken.
+      if (showerEnabled && rooms.some((r) => r.tempAlias === null)) {
+        // Without a temperature the rise is compared on raw relative humidity,
+        // which cannot tell water added from a room that merely cooled down.
+        // It still works; it is just the weaker signal, and saying so beats
+        // letting someone wonder later why one room reacts differently.
+        const blind = rooms.filter((r) => r.tempAlias === null).map((r) => r.name);
         ctx.log(
-          "Détection de douche inactive : aucune sonde ne remonte la température de sa pièce.",
+          `Détection de douche dégradée sur ${blind.join(", ")} : sans température, l'eau ajoutée ne peut pas être distinguée d'une pièce qui refroidit.`,
           "warn",
         );
       }
