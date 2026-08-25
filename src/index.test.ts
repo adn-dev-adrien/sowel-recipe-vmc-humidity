@@ -26,6 +26,8 @@ interface RoomSpec {
   humidity: number | null;
   temperature?: number | null;
   lastUpdated?: string;
+  /** Zone the probe sits in — what the journal should call the room. */
+  zoneName?: string;
 }
 
 function makeCtx(opts?: {
@@ -71,6 +73,7 @@ function makeCtx(opts?: {
 
   const equipments: Record<string, {
     name: string;
+    zoneId?: string;
     dataBindings: Array<{ alias: string; category?: string; value?: unknown; lastUpdated?: string | null }>;
     orderBindings: Array<{ alias: string; category?: string; type?: string }>;
   }> = {
@@ -89,9 +92,12 @@ function makeCtx(opts?: {
     };
   }
 
+  const zoneNames: Record<string, string> = { "zone-1": "Maison" };
   for (const r of rooms) {
+    if (r.zoneName) zoneNames[`zone-of-${r.id}`] = r.zoneName;
     equipments[r.id] = {
       name: r.name,
+      ...(r.zoneName ? { zoneId: `zone-of-${r.id}` } : {}),
       dataBindings: [
         makeBinding("humidity", "humidity", r.humidity, r.lastUpdated),
         ...(r.temperature === undefined
@@ -136,7 +142,9 @@ function makeCtx(opts?: {
     equipmentManager: {
       getByIdWithDetails: (id: string) => equipments[id] ?? null,
     },
-    zoneManager: { getById: (id: string) => (id === "zone-1" ? { id, name: "Maison" } : null) },
+    zoneManager: {
+      getById: (id: string) => (zoneNames[id] ? { id, name: zoneNames[id] } : null),
+    },
     logger: { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} },
     state: {
       get: (k: string) => stateMap.get(k),
@@ -659,7 +667,9 @@ describe("a bad reading must not remove the outdoor guard", () => {
       outdoor: { humidity: 50, temperature: 22 },
     });
     const inst = createRecipe().createInstance(params, h.ctx as never);
-    expect(h.logs.some((l) => l.includes("plancher 50 %") && l.includes("gain 20 pts"))).toBe(true);
+    expect(
+      h.logs.some((l) => l.includes("descendre à 50 %") && l.includes("20 pts à gagner")),
+    ).toBe(true);
     inst.stop();
   });
 });
@@ -1078,7 +1088,11 @@ describe("showers", () => {
     expect(vmcOrders(h.orders)).toEqual([true]);
     expect(h.state.get("showerRunning")).toBe(true);
     expect(h.state.get("status")).toBe("shower");
-    expect(h.logs.some((l) => l.includes("Douche détectée"))).toBe(true);
+    // One line, not two: the cause travels with the order.
+    expect(h.logs.some((l) => l.startsWith("VMC ON — Douche SDB") && l.includes("pts d'eau"))).toBe(
+      true,
+    );
+    expect(h.logs.filter((l) => l.includes("Douche SDB"))).toHaveLength(1);
 
     // Halfway back down is not back: the pre-shower level was 52 %.
     vi.advanceTimersByTime(20 * 60_000);
@@ -1089,7 +1103,9 @@ describe("showers", () => {
     h.emit("room-1", "humidity", 53);
     expect(vmcOrders(h.orders)).toEqual([true, false]);
     expect(h.state.get("showerRunning")).toBe(false);
-    expect(h.logs.some((l) => l.includes("niveau d'avant la douche"))).toBe(true);
+    expect(
+      h.logs.some((l) => l.startsWith("VMC OFF —") && l.includes("niveau d'avant la douche")),
+    ).toBe(true);
     inst.stop();
   });
 
@@ -1417,7 +1433,7 @@ describe("showers", () => {
     h.emit("room-1", "humidity", 60.5); // 22:33 — two showers, temperature flat
     expect(vmcOrders(h.orders)).toEqual([true]);
     expect(h.state.get("status")).toBe("shower");
-    expect(h.logs.some((l) => l.includes("Douche détectée"))).toBe(true);
+    expect(h.logs.some((l) => l.startsWith("VMC ON — Douche SDB"))).toBe(true);
     inst.stop();
   });
 
@@ -1459,6 +1475,84 @@ describe("showers", () => {
     expect(() =>
       createRecipe().validate({ ...baseParams, showerMaxRun: "later" }, ctx as never),
     ).toThrow(/shower/i);
+  });
+});
+
+describe("the journal says why", () => {
+  // Every start and stop used to be written twice — the cycle line and the
+  // relay line, carrying the same numbers — and the room was named after the
+  // probe, so three bathrooms all read "Température à 60.1 %".
+
+  it("writes one line per transition, carrying the reason", () => {
+    const h = makeCtx({ rooms: [{ id: "room-1", name: "SDB", humidity: 45, temperature: 21 }] });
+    const inst = createRecipe().createInstance(
+      { ...baseParams, showerMode: "off" },
+      h.ctx as never,
+    );
+    const before = h.logs.length;
+
+    h.emit("room-1", "humidity", 70);
+    const start = h.logs.slice(before);
+    expect(start).toHaveLength(1);
+    expect(start[0]).toMatch(/^VMC ON — Humidité .* 70 % au-dessus du maxi 60 %/);
+
+    vi.advanceTimersByTime(16 * 60_000);
+    h.emit("room-1", "humidity", 45);
+    const stop = h.logs.slice(before + 1);
+    expect(stop).toHaveLength(1);
+    expect(stop[0]).toMatch(/^VMC OFF — Humidité redescendue .* sous la cible 50 %/);
+    inst.stop();
+  });
+
+  it("states what the outdoor air makes possible when it starts", () => {
+    const h = makeCtx({
+      rooms: [{ id: "room-1", name: "SDB", humidity: 45, temperature: 22 }],
+      outdoor: { humidity: 50, temperature: 22 },
+    });
+    const inst = createRecipe().createInstance(
+      { ...baseParams, showerMode: "off", outdoorSensor: "out-1" },
+      h.ctx as never,
+    );
+    h.emit("room-1", "humidity", 70);
+    expect(h.logs.at(-1)).toContain("l'air extérieur permet de descendre à 50 %");
+    expect(h.logs.at(-1)).toContain("20 pts à gagner");
+    inst.stop();
+  });
+
+  it("names the room after its zone, not after the probe", () => {
+    // Zigbee probes all arrive called "Température"; the zone is the room.
+    const h = makeCtx({
+      rooms: [{ id: "room-1", name: "Température", zoneName: "Salle de bain", humidity: 45, temperature: 21 }],
+    });
+    const inst = createRecipe().createInstance(
+      { ...baseParams, showerMode: "off" },
+      h.ctx as never,
+    );
+    h.emit("room-1", "humidity", 70);
+    expect(h.logs.at(-1)).toContain("Salle de bain");
+    expect(h.logs.at(-1)).not.toContain("Température");
+    inst.stop();
+  });
+
+  it("keeps a cycle ending visible when another one holds the ventilation on", () => {
+    const h = makeCtx({
+      rooms: [{ id: "room-1", name: "SDB", humidity: 65, temperature: 21 }],
+      motion: [{ id: "wc-1", name: "WC" }],
+    });
+    const inst = createRecipe().createInstance(
+      { ...baseParams, showerMode: "off", motionSensors: ["wc-1"] },
+      h.ctx as never,
+    );
+    h.emit("wc-1", "motion", true);
+    vi.advanceTimersByTime(90_000); // presence confirmed, VMC already running
+
+    vi.advanceTimersByTime(15 * 60_000);
+    h.emit("room-1", "humidity", 45); // humidity cycle ends, the visit does not
+    const last = h.logs.at(-1) as string;
+    expect(last).toContain("Humidité redescendue");
+    expect(last).toContain("la VMC continue de tourner");
+    expect(vmcOrders(h.orders)).toEqual([true]);
+    inst.stop();
   });
 });
 
