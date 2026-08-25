@@ -50,21 +50,41 @@ A shower never trips the thresholds in time. By the time the bathroom crosses
 that follows stops at the target — which may be well above where the room
 actually was.
 
-So a shower is detected, not waited for, and what names it is the
-**correlation**:
+So a shower is detected, not waited for, and what names it is **water actually
+added** — not relative humidity, which is not a quantity of water at all. The
+same air reads 50 % at 24 °C and 56 % at 22 °C without a drop being added, so
+an evening of cooling looks exactly like a room getting wetter.
 
-| What moves             | Humidity | Temperature | Verdict    |
-| ---------------------- | -------- | ----------- | ---------- |
-| Someone showers        | ↑ fast   | ↑           | **shower** |
-| Weather, a wet evening | ↑ slow   | flat        | ignored    |
-| The heating comes on   | ↓        | ↑           | ignored    |
+Each reading is therefore converted to its vapour pressure, and the driest
+sample of the window is expressed at the room's *current* temperature before
+being compared — the same psychrometric trick as the outdoor floor above,
+applied to the room's own past:
 
-Concretely: **+4 points of relative humidity and +0.5 °C within 45 minutes**,
-measured against the driest reading of that window — not against the previous
-one, so a probe reporting every 30 min and one reporting every minute are
-judged the same way. The room needs a temperature probe; one that reports
-humidity only falls back to the plain thresholds, and the recipe says so at
-startup.
+```
+what the room held 30 min ago, read at today's temperature
+        = RH_before × Psat(T_before) / Psat(T_now)
+```
+
+| What moves                       | Raw reading | Water | Verdict    |
+| -------------------------------- | ----------- | ----- | ---------- |
+| Someone showers                  | ↑ fast      | ↑     | **shower** |
+| The room cools down for the night| ↑           | flat  | ignored    |
+| The heating comes on             | ↓           | flat  | ignored    |
+| Weather, a wet evening           | ↑ slow      | ↑ slow| ignored    |
+
+Concretely: **+4 points of added water within 45 minutes**, measured against
+the driest reading of that window — not against the previous one, so a probe
+reporting every 30 min and one reporting every minute are judged the same way.
+A room that reports no temperature falls back to the raw reading, which cannot
+tell water from cooling; the recipe says so at startup rather than pretending.
+
+> **Why not require the temperature to rise too?** Because it does not. On
+> 2026-08-24 at 22:33 two bathrooms took a shower each: one gained 6.1 points
+> with the temperature dead flat at 24.7 °C, the other 1.2 raw points while
+> warming 1.5 °C — 6.2 points of water. A version of this recipe that demanded
+> half a degree of warming missed the first one entirely, and the room held
+> 60 % until morning. In summer a bathroom already at 25 °C does not warm up.
+> Temperature belongs in the conversion, not in a gate.
 
 ### Each bathroom sets its own bar
 
@@ -93,15 +113,15 @@ cannot see showers at all, and tuning would only paper over it.
 
 What follows is a **drying cycle**, not a normal one:
 
-- it targets the humidity the room had **before** the shower (+1 point — the
-  last point is asymptotic), never the configured target;
+- it stops at whichever comes **first**: the humidity the room had before the
+  shower (+1 point — the last one is asymptotic), or the configured target;
 - it runs at the high speed while the room is over `humidityMax`, then at the
   low one to finish;
 - it **starts inside the quiet window**. A bathroom left saturated at 23:00 is
   still wet at 07:00, and the noise costs less than the mould;
 - it stops early if the outdoor air is wetter than the room — no run time beats
   the psychrometry;
-- it gives up after `showerMaxRun` (1 h by default) rather than running all
+- it gives up after `showerMaxRun` (45 min by default) rather than running all
   night on a room that will not come back;
 - a second shower on the same room extends the cycle and keeps the **first**
   baseline: the level to come back to is the one before anybody ran the water.
@@ -177,7 +197,7 @@ the value is re-read on every evaluation.
 | `motionMaxRun`                    | 45 min  | Cap of an occupancy cycle (then a 30 min pause)                   |
 | `showerMode`                      | Yes     | Detect showers and dry the room back to its pre-shower level      |
 | `showerRise`                      | 4 pts   | Starting bar, then fitted per room                                 |
-| `showerMaxRun`                    | 1 h     | Cap of a drying cycle                                             |
+| `showerMaxRun`                    | 45 min  | Cap of a drying cycle                                             |
 
 ## The ventilation can be driven by something else
 

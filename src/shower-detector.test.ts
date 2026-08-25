@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createShowerDetector } from "./shower-detector.js";
+import { createShowerDetector, psat } from "./shower-detector.js";
 
 // The module under test knows nothing about Sowel, so neither do these tests:
 // they hand it readings and a clock, and ask what it names.
@@ -20,47 +20,80 @@ function feed(
   return hits;
 }
 
+/** What a room reads at `t` when it holds the water it held at `rh0`/`t0`. */
+const sameWater = (rh0: number, t0: number, t: number) => (rh0 * psat(t0)) / psat(t);
+
 describe("shower detector", () => {
-  it("names a shower when the humidity and the temperature climb together", () => {
+  it("names the shower of 2026-08-24, which raised no temperature at all", () => {
+    // The one this module was rewritten for. An August evening, the bathroom
+    // already at a flat 24.7 °C, sensor reporting every 30 min. The first
+    // version required the temperature to rise with the humidity and stayed
+    // silent; the room held 60 % all night.
     const d = createShowerDetector();
     const hits = feed(d, "sdb", [
-      [0, 52, 20.5],
-      [30, 52, 20.6], // a 30 min reporting cadence, room at rest
-      [40, 68, 22.4], // someone showers
+      [0, 53.9, 24.7],
+      [30, 54.0, 24.7],
+      [60, 54.4, 24.7],
+      [90, 60.5, 24.7], // 22:33 — two showers
     ]);
     expect(hits).toHaveLength(1);
-    expect(hits[0].baseline).toBe(52);
-    expect(hits[0].gain).toBeCloseTo(16, 5);
-    expect(hits[0].tempGain).toBeCloseTo(1.9, 5);
+    expect(hits[0].baseline).toBe(54.4);
+    expect(hits[0].gain).toBeCloseTo(6.1, 5);
   });
 
-  it("ignores humidity climbing on its own — that is the weather", () => {
-    // Both gîte bathrooms, 21:00 → 02:00, +10 points with the temperature flat.
+  it("sees the water through a room that warmed up at the same time", () => {
+    // The other bathroom, the same evening: +1.2 points of raw reading, but
+    // the room warmed 20.85 → 22.32 °C, so the water really added up.
+    const d = createShowerDetector();
+    const hits = feed(d, "sdb", [
+      [0, 58.94, 20.85],
+      [16, 60.12, 22.32],
+    ]);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].gain).toBeCloseTo(6.2, 1);
+  });
+
+  it("ignores a room that merely cools down, however high the reading climbs", () => {
+    // Evening cooling at constant water: 50 % at 24 °C reads 56.4 % at 22 °C
+    // without a drop being added. Raw relative humidity calls that +6.4.
+    const d = createShowerDetector();
+    const hits = feed(d, "sdb", [
+      [0, 50, 24],
+      [20, sameWater(50, 24, 23), 23],
+      [40, sameWater(50, 24, 22), 22],
+    ]);
+    expect(hits).toEqual([]);
+    expect(sameWater(50, 24, 22)).toBeGreaterThan(56); // the raw rise it ignored
+  });
+
+  it("ignores a room being heated at constant water", () => {
+    const d = createShowerDetector();
+    expect(
+      feed(d, "sdb", [
+        [0, 60, 17],
+        [20, sameWater(60, 17, 19), 19],
+        [40, sameWater(60, 17, 21), 21],
+      ]),
+    ).toEqual([]);
+  });
+
+  it("ignores water creeping in all evening — that is the weather", () => {
+    // Both gîte bathrooms, 21:00 → 02:00, +10 points with the temperature
+    // flat: 0.036 points a minute against 0.2 for the shower above.
     const d = createShowerDetector();
     const points: Array<[number, number, number | null]> = [];
     for (let i = 0; i <= 20; i++) points.push([i * 15, 55 + i * 0.5, 20.4]);
     expect(feed(d, "sdb", points)).toEqual([]);
   });
 
-  it("ignores the room warming up — heating pushes the relative humidity down", () => {
+  it("falls back to the raw reading when the room has no temperature", () => {
     const d = createShowerDetector();
-    expect(
-      feed(d, "sdb", [
-        [0, 60, 17],
-        [20, 55, 19],
-        [40, 51, 21],
-      ]),
-    ).toEqual([]);
-  });
-
-  it("says nothing about a room with no temperature probe", () => {
-    const d = createShowerDetector();
-    expect(
-      feed(d, "sdb", [
-        [0, 50, null],
-        [20, 72, null],
-      ]),
-    ).toEqual([]);
+    const hits = feed(d, "sdb", [
+      [0, 50, null],
+      [20, 58, null],
+    ]);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].gain).toBeCloseTo(8, 5);
   });
 
   it("announces a burst once, however often it is asked", () => {
@@ -69,7 +102,7 @@ describe("shower detector", () => {
     let hits = 0;
     // A caller ticking every 30 s for half an hour on a room that stays wet.
     for (let s = 30; s <= 1800; s += 30) {
-      if (d.sample("sdb", { at: 10 * MIN + s * 1000, humidity: 66, temperature: 21.5 })) hits++;
+      if (d.sample("sdb", { at: 10 * MIN + s * 1000, humidity: 66, temperature: 20 })) hits++;
     }
     expect(hits).toBe(1);
   });
@@ -78,9 +111,9 @@ describe("shower detector", () => {
     const d = createShowerDetector();
     const hits = feed(d, "sdb", [
       [0, 50, 20],
-      [10, 62, 21.2], // first shower
-      [40, 60, 21.0], // barely dropped
-      [50, 70, 22.0], // second shower
+      [10, 62, 20], // first shower
+      [40, 60, 20], // barely dropped
+      [50, 70, 20], // second shower
     ]);
     expect(hits.map((x) => x.atMin)).toEqual([10, 50]);
     // The second one is measured from where the room actually was, not from
@@ -94,7 +127,7 @@ describe("shower detector", () => {
     // differently — 0.2 points a step against 4 — the window does not.
     const fast = createShowerDetector();
     const fastPoints: Array<[number, number, number | null]> = [];
-    for (let i = 0; i <= 25; i++) fastPoints.push([i, 52 + i * 0.2, 20 + i * 0.03]);
+    for (let i = 0; i <= 25; i++) fastPoints.push([i, 52 + i * 0.2, 20]);
     const fastHits = feed(fast, "sdb", fastPoints);
     expect(fastHits).toHaveLength(1);
     expect(fastHits[0].baseline).toBe(52);
@@ -102,7 +135,7 @@ describe("shower detector", () => {
     const slow = createShowerDetector();
     const slowHits = feed(slow, "sdb", [
       [0, 52, 20],
-      [20, 56, 20.6],
+      [20, 56, 20],
     ]);
     expect(slowHits).toHaveLength(1);
     expect(slowHits[0].baseline).toBe(52);
@@ -111,9 +144,9 @@ describe("shower detector", () => {
   it("forgets a rise that took longer than the window", () => {
     const d = createShowerDetector();
     const points: Array<[number, number, number | null]> = [];
-    // +12 points and +1.5 °C, but spread over three hours: a wet day, not a
-    // shower. Every 45 min window only ever sees a third of it.
-    for (let i = 0; i <= 36; i++) points.push([i * 5, 55 + i * 0.33, 20 + i * 0.04]);
+    // +12 points over three hours: a wet day, not a shower. Every 45 min
+    // window only ever sees a third of it.
+    for (let i = 0; i <= 36; i++) points.push([i * 5, 55 + i * 0.33, 20]);
     expect(feed(d, "sdb", points)).toEqual([]);
   });
 
@@ -121,15 +154,16 @@ describe("shower detector", () => {
     const d = createShowerDetector();
     d.sample("a", { at: 0, humidity: 50, temperature: 20 });
     d.sample("b", { at: 0, humidity: 70, temperature: 20 });
-    expect(d.sample("b", { at: 10 * MIN, humidity: 71, temperature: 21 })).toBeNull();
-    expect(d.sample("a", { at: 10 * MIN, humidity: 60, temperature: 21 })).not.toBeNull();
+    expect(d.sample("b", { at: 10 * MIN, humidity: 71, temperature: 20 })).toBeNull();
+    expect(d.sample("a", { at: 10 * MIN, humidity: 60, temperature: 20 })).not.toBeNull();
   });
 
-  it("takes its thresholds from the caller", () => {
-    const d = createShowerDetector({ risePts: 10, tempRiseC: 2 });
+  it("takes its bar from the caller, per room", () => {
+    const d = createShowerDetector();
     d.sample("sdb", { at: 0, humidity: 50, temperature: 20 });
-    expect(d.sample("sdb", { at: 10 * MIN, humidity: 58, temperature: 23 })).toBeNull();
-    expect(d.sample("sdb", { at: 20 * MIN, humidity: 62, temperature: 23 })).not.toBeNull();
+    // The same rise, judged against two different bars.
+    expect(d.sample("sdb", { at: 10 * MIN, humidity: 58, temperature: 20 }, { risePts: 10 })).toBeNull();
+    expect(d.sample("sdb", { at: 20 * MIN, humidity: 58, temperature: 20 }, { risePts: 4 })).not.toBeNull();
   });
 
   it("drops a room on request", () => {
@@ -137,6 +171,6 @@ describe("shower detector", () => {
     d.sample("sdb", { at: 0, humidity: 50, temperature: 20 });
     d.forget("sdb");
     // Nothing to compare against any more: the rise starts from scratch.
-    expect(d.sample("sdb", { at: 10 * MIN, humidity: 66, temperature: 22 })).toBeNull();
+    expect(d.sample("sdb", { at: 10 * MIN, humidity: 66, temperature: 20 })).toBeNull();
   });
 });

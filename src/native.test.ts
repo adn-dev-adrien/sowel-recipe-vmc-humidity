@@ -83,6 +83,10 @@ const baseParams = {
   boostDelta: 5,
   minRun: "15m",
   maxRun: "3h",
+  // These tests step the humidity in one jump to reach a threshold, which a
+  // real room only ever does under a shower. Detection off, so what they
+  // assert stays the speed logic of the humidity cycle.
+  showerMode: "off",
 };
 
 /** Speed orders sent to the native VMC. */
