@@ -2,7 +2,7 @@
   "id": "vmc-humidity",
   "type": "recipe",
   "name": "VMC Humidity Control",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Runs the ventilation to extract humidity from the rooms it serves — only when the outdoor air can actually dry them —, on a detected shower, and on presence in the toilets. Use it alone on a given ventilation.",
   "icon": "Fan",
   "repo": "adn-dev-adrien/sowel-recipe-vmc-humidity",
