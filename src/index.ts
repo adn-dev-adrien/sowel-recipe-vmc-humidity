@@ -1646,6 +1646,10 @@ export function createRecipe(): RecipeDefinition {
           let boostDemand = false;
           let boostHold = false;
           let blockedByOutdoor = false;
+          let triggerName = "";
+          let triggerHumidity = 0;
+          let triggerFloor: number | null = null;
+          let triggerGain = -Infinity;
 
           for (const r of fresh) {
             const rh = r.humidity as number;
@@ -1678,7 +1682,20 @@ export function createRecipe(): RecipeDefinition {
               continue;
             }
             if (rh >= humidityMax && !worthStarting) blockedByOutdoor = true;
-            if (rh >= humidityMax && worthStarting) demand = true;
+            if (rh >= humidityMax && worthStarting) {
+              demand = true;
+              // The room that justifies the cycle is not always the wettest
+              // one: a warm laundry room at 59 % clears the margin easily
+              // while a cool bathroom at 61 % does not, because the floor is
+              // computed against each room's own temperature. Keep the one
+              // with the most to gain — it is the one the log must name.
+              if (gain > triggerGain) {
+                triggerGain = gain;
+                triggerName = r.name;
+                triggerHumidity = rh;
+                triggerFloor = floor;
+              }
+            }
             if (rh > effectiveMin) hold = true;
             if (rh >= humidityMax + boostDelta) boostDemand = true;
             if (rh >= humidityMax) boostHold = true;
@@ -1735,9 +1752,9 @@ export function createRecipe(): RecipeDefinition {
             detail = "Repos après arrêt sur durée maximale";
           } else if (demand) {
             startHumidityRun(
-              worstFloor === null
-                ? `Humidité ${worstName} ${round1(worstHumidity)} % au-dessus du maxi ${humidityMax} %`
-                : `Humidité ${worstName} ${round1(worstHumidity)} % au-dessus du maxi ${humidityMax} % — l'air extérieur permet de descendre à ${round1(worstFloor)} % (${round1(worstHumidity - worstFloor)} pts à gagner)`,
+              triggerFloor === null
+                ? `Humidité ${triggerName} ${round1(triggerHumidity)} % au-dessus du maxi ${humidityMax} %`
+                : `Humidité ${triggerName} ${round1(triggerHumidity)} % au-dessus du maxi ${humidityMax} % — l'air extérieur permet de descendre à ${round1(triggerFloor)} % (${round1(triggerGain)} pts à gagner)`,
             );
             status = "running";
             detail = `Extraction en cours — ${worst}`;
