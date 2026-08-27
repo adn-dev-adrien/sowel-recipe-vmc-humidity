@@ -134,6 +134,38 @@ The detector itself lives in [`src/shower-detector.ts`](src/shower-detector.ts)
 by any other recipe needing the same signal (`sowel-recipe-water-heater-smart`
 counts showers to bill the tank).
 
+## The journal
+
+Every start and every stop is **one line**, and it carries the reason it acted
+on. The room is named after its **zone**, not after the probe — Zigbee sensors
+all arrive called `Température`, which made three bathrooms read alike:
+
+```
+VMC ON  — Humidité Salle de bain 60.1 % au-dessus du maxi 56 % — l'air extérieur
+          permet de descendre à 42.5 % (17.6 pts à gagner)
+VMC OFF — Humidité redescendue — Salle de bain 49.4 %, sous la cible 50 %
+
+VMC ON  — Douche Salle de bain — 60.5 %, +6.1 pts d'eau (seuil 4) : séchage jusqu'à 55.4 %
+VMC OFF — Fin du séchage Salle de bain — 55.2 % en 38min, revenue à son niveau
+          d'avant la douche (54.4 %)
+
+VMC ON  — Présence confirmée — WC
+VMC OFF — Fin de la présence — 15min sans détection
+
+VMC OFF — Plage silencieuse (22:00–08:00)
+VMC OFF — Durée maxi 3h atteinte — repos forcé 1h
+VMC OFF — VMC coupée à la main pendant le cycle — la recette se retire 1h
+```
+
+Before, each of these was written twice: once by the cycle, once by the relay,
+with the same numbers in both. When a cycle ends without the ventilation
+stopping — because a visit or another room still holds it — the line says so
+rather than disappearing:
+
+```
+Humidité redescendue — Salle de bain 49.4 %, sous la cible 50 % — la VMC continue de tourner
+```
+
 ## ⚠️ One recipe per ventilation
 
 Do not drive the same unit with this recipe **and** a schedule recipe: each

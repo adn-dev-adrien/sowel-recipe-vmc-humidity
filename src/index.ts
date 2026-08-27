@@ -61,6 +61,9 @@ interface OrderBindingLite {
 interface EquipmentLite {
   name: string;
   type?: string;
+  /** Zone the equipment sits in. Used to name a room in the journal: probes
+   *  are routinely called "Température", zones are called "Salle de bain". */
+  zoneId?: string;
   dataBindings: DataBindingLite[];
   orderBindings: OrderBindingLite[];
 }
@@ -984,15 +987,29 @@ export function createRecipe(): RecipeDefinition {
           continue;
         }
         const tempAlias = findAlias(eq, ["temperature"], ["temperature"]);
+        // A journal has to name the room, not the probe. Zigbee sensors all
+        // arrive called "Température", so every line read "Température à
+        // 60.1 %" whichever bathroom it was. The zone carries the real name.
+        const zoneName = eq.zoneId ? (ctx.zoneManager.getById(eq.zoneId)?.name ?? null) : null;
         rooms.push({
           id,
-          name: eq.name,
+          name: zoneName ?? eq.name,
           humAlias,
           tempAlias,
           humidity: bindingValue(eq, humAlias),
           humidityAt: bindingUpdatedAt(eq, humAlias) || Date.now(),
           temperature: bindingValue(eq, tempAlias),
         });
+      }
+
+      // Two probes in one zone would otherwise share a label: fall back to the
+      // equipment name for both, which is at least distinct.
+      for (const r of rooms) {
+        const twins = rooms.filter((o) => o.name === r.name);
+        if (twins.length > 1) {
+          const eq = ctx.equipmentManager.getByIdWithDetails(r.id);
+          if (eq) r.name = `${r.name} (${eq.name})`;
+        }
       }
 
       let outdoorHumidity = bindingValue(outdoorEq, outdoorHumAlias);
@@ -1020,7 +1037,8 @@ export function createRecipe(): RecipeDefinition {
           ctx.log(`Détecteur "${eq.name}" sans donnée de mouvement, ignoré`, "warn");
           continue;
         }
-        motionSensors.push({ id, name: eq.name, alias, firstAt: null, lastAt: null });
+        const zoneName = eq.zoneId ? (ctx.zoneManager.getById(eq.zoneId)?.name ?? null) : null;
+        motionSensors.push({ id, name: zoneName ?? eq.name, alias, firstAt: null, lastAt: null });
       }
 
       // ── Runtime state ───────────────────────────────────────
@@ -1121,9 +1139,9 @@ export function createRecipe(): RecipeDefinition {
        * startup silence (a fresh instance must not force an OFF onto a unit
        * running by hand) and its "already there" short-circuit.
        */
-      const applyNativeSpeed = (extraction: boolean, high: boolean, why: string) => {
+      const applyNativeSpeed = (extraction: boolean, high: boolean, why: string): boolean => {
         const target = !extraction ? "off" : high ? "v2" : "v1";
-        if (lastSpeed === target) return;
+        if (lastSpeed === target) return false;
         const firstAssert = lastSpeed === null;
         lastSpeed = target;
         mainOn = extraction;
@@ -1131,22 +1149,23 @@ export function createRecipe(): RecipeDefinition {
         putState("vmcOn", extraction);
         putState("boostOn", extraction && high);
         putState("vmcSpeed", target);
-        if (firstAssert && target === "off") return;
+        if (firstAssert && target === "off") return true;
         const label = target === "off" ? "arrêt" : target === "v2" ? "grande vitesse" : "petite vitesse";
         ctx.log(`VMC → ${label} — ${why}`);
         sendSpeed(target);
+        return true;
       };
 
       // An instance is restarted on every recipe update or param edit. Coming
       // up with nothing to do must stay silent: forcing an OFF at startup
       // would fight whoever switched the VMC on by hand.
-      const setMain = (on: boolean, why: string) => {
-        if (mainOn === on) return;
+      const setMain = (on: boolean, why: string): boolean => {
+        if (mainOn === on) return false;
         const firstAssert = mainOn === null;
         mainOn = on;
         putState("vmcOn", on);
         vmcAgreed = false; // wait for the relay to confirm this one
-        if (firstAssert && !on) return;
+        if (firstAssert && !on) return true;
         // The relay is already there — usually after a restart, where the
         // recipe re-decides from scratch while the ventilation never stopped.
         // Sending the order anyway produces no state change, and the core's
@@ -1155,24 +1174,26 @@ export function createRecipe(): RecipeDefinition {
         if (vmcObserved === on) {
           vmcAgreed = true;
           ctx.log(`VMC déjà ${on ? "en marche" : "à l'arrêt"} — ${why}`);
-          return;
+          return true;
         }
         ctx.log(`VMC ${on ? "ON" : "OFF"} — ${why}`);
         sendOrder(vmcId, vmcOrderAlias, on, "VMC");
+        return true;
       };
 
-      const setBoost = (on: boolean, why: string) => {
-        if (!boostId || !boostOrderAlias || boostOn === on) return;
+      const setBoost = (on: boolean, why: string): boolean => {
+        if (!boostId || !boostOrderAlias || boostOn === on) return false;
         const firstAssert = boostOn === null;
         boostOn = on;
         putState("boostOn", on);
-        if (firstAssert && !on) return;
+        if (firstAssert && !on) return true;
         if (boostObserved === on) {
           ctx.log(`Grande vitesse déjà ${on ? "en marche" : "à l'arrêt"} — ${why}`);
-          return;
+          return true;
         }
         ctx.log(`Grande vitesse ${on ? "ON" : "OFF"} — ${why}`);
         sendOrder(boostId, boostOrderAlias, on, "grande vitesse");
+        return true;
       };
 
       /**
@@ -1182,18 +1203,15 @@ export function createRecipe(): RecipeDefinition {
        * so extraction can only mean the high speed — otherwise the recipe
        * would "run" without changing anything.
        */
-      const applyOutputs = (extraction: boolean, high: boolean, why: string) => {
-        if (nativeVmc) {
-          applyNativeSpeed(extraction, high, why);
-          return;
-        }
+      const applyOutputs = (extraction: boolean, high: boolean, why: string): boolean => {
+        if (nativeVmc) return applyNativeSpeed(extraction, high, why);
         if (alwaysOn) {
           setMain(true, "petite vitesse permanente");
-          setBoost(extraction, why);
-          return;
+          return setBoost(extraction, why);
         }
-        setMain(extraction, why);
-        if (boostId) setBoost(extraction && high, why);
+        const changed = setMain(extraction, why);
+        const boostChanged = boostId ? setBoost(extraction && high, why) : false;
+        return changed || boostChanged;
       };
 
       /**
@@ -1397,19 +1415,36 @@ export function createRecipe(): RecipeDefinition {
       };
 
       const fmt = (ms: number) => ctx.helpers.formatDuration(ms);
+      const quietText = `${String(params.quietStart ?? "22:00")}–${String(params.quietEnd ?? "07:00")}`;
+
+      /**
+       * Why the ventilation is about to change state, in the words a human
+       * reads in the journal.
+       *
+       * Collected rather than logged on the spot: a cycle starting and the
+       * relay switching on are one event, and writing both produced the
+       * duplicated pair the journal was full of —
+       *   `Extraction humidité — Température à 60.1 % (plancher 42.5 %…)`
+       *   `VMC ON — Extraction en cours — Température à 60.1 % (plancher…)`
+       * At the end of the tick these become a single `VMC ON — <cause>` when
+       * the output moved, and stand on their own when it did not (the
+       * humidity cycle ending while a visit keeps the ventilation running).
+       */
+      let causes: string[] = [];
+      const because = (cause: string) => causes.push(cause);
 
       const startHumidityRun = (why: string) => {
         running = true;
         runStartedAt = Date.now();
         putState("running", true);
-        ctx.log(`Extraction humidité — ${why}`);
+        because(why);
       };
 
       const stopHumidityRun = (why: string) => {
         running = false;
         highDemand = false;
         putState("running", false);
-        ctx.log(`Extraction humidité terminée — ${why}`);
+        because(why);
       };
 
       // ── Core evaluation ─────────────────────────────────────
@@ -1418,6 +1453,7 @@ export function createRecipe(): RecipeDefinition {
         const now = Date.now();
         const d = new Date(now);
         const nowMin = d.getHours() * 60 + d.getMinutes();
+        causes = [];
 
         refreshReadings(now);
 
@@ -1430,24 +1466,23 @@ export function createRecipe(): RecipeDefinition {
         if (motionRunning) {
           if (quietBlocksMotion) {
             motionRunning = false;
-            ctx.log("Extraction occupation arrêtée — plage silencieuse");
+            because(`Fin de la présence — plage silencieuse (${quietText})`);
           } else if (now - motionRunStartedAt >= motionMaxRunMs) {
             // Sustained detections for that long are not a toilet visit —
             // most likely an open door watching a busy hallway.
             motionRunning = false;
             setMotionBlockedUntil(now + MOTION_BLOCK_MS);
-            ctx.log(
-              `Extraction occupation arrêtée — ${fmt(motionMaxRunMs)} de détections continues (porte ouverte ?), pause de ${fmt(MOTION_BLOCK_MS)}`,
-              "warn",
+            because(
+              `Fin de la présence — ${fmt(motionMaxRunMs)} de détections d'affilée, ce n'est plus un passage (porte ouverte ?), pause ${fmt(MOTION_BLOCK_MS)}`,
             );
           } else if (lastMotionAt === 0 || now - lastMotionAt > motionRunAfterMs) {
             motionRunning = false;
-            ctx.log(`Extraction occupation terminée — ${fmt(motionRunAfterMs)} sans détection`);
+            because(`Fin de la présence — ${fmt(motionRunAfterMs)} sans détection`);
           }
         } else if (!quietBlocksMotion && now >= motionBlockedUntil && confirmedBy !== null) {
           motionRunning = true;
           motionRunStartedAt = now;
-          ctx.log(`Occupation confirmée (${confirmedBy}) — extraction`);
+          because(`Présence confirmée — ${confirmedBy}`);
         }
         putState("motionRunning", motionRunning);
 
@@ -1481,7 +1516,9 @@ export function createRecipe(): RecipeDefinition {
               // still the one before anybody ran the water, so the target
               // stands — but the cap gets its full time again.
               existing.startedAt = now;
-              ctx.log(`Nouvelle douche (${room.name}, +${gained} pts) — séchage prolongé`);
+              ctx.log(
+                `Nouvelle douche ${room.name} — +${gained} pts d'eau : séchage prolongé, toujours jusqu'à ${existing.target} %`,
+              );
             } else if (now < blockedUntil) {
               // Someone cut the ventilation by hand, or the maximum run time
               // just forced it off. Both are instructions; say what was
@@ -1499,8 +1536,8 @@ export function createRecipe(): RecipeDefinition {
                 baseline: hit.baseline,
                 peak: rh,
               });
-              ctx.log(
-                `Douche détectée (${room.name}) — ${round1(rh)} % (+${gained} pts d'eau ajoutée, seuil ${round1(hit.risePts)} pts), séchage jusqu'à ${target} %`,
+              because(
+                `Douche ${room.name} — ${round1(rh)} %, +${gained} pts d'eau (seuil ${round1(hit.risePts)}) : séchage jusqu'à ${target} %`,
               );
             }
           }
@@ -1510,7 +1547,7 @@ export function createRecipe(): RecipeDefinition {
             const rh = room?.humidity ?? null;
             if (room === undefined || rh === null || now - room.humidityAt > STALE_READING_MS) {
               showerCycles.delete(id);
-              ctx.log(`Séchage ${cycle.name} arrêté — plus de mesure d'humidité`, "warn");
+              because(`Fin du séchage ${cycle.name} — la sonde ne remonte plus rien`);
               continue;
             }
             // The room keeps climbing for a while after the water stops: the
@@ -1523,25 +1560,24 @@ export function createRecipe(): RecipeDefinition {
             );
             if (rh <= cycle.target) {
               showerCycles.delete(id);
-              ctx.log(
-                `Séchage ${cycle.name} terminé — ${round1(rh)} % en ${fmt(now - cycle.startedAt)} (${
+              because(
+                `Fin du séchage ${cycle.name} — ${round1(rh)} % en ${fmt(now - cycle.startedAt)}, ${
                   cycle.target > cycle.baseline + SHOWER_RECOVERY_PTS
-                    ? `cible ${humidityMin} %`
-                    : "niveau d'avant la douche"
-                })`,
+                    ? `sous la cible ${humidityMin} %`
+                    : `revenue à son niveau d'avant la douche (${round1(cycle.baseline)} %)`
+                }`,
               );
               recordAmplitude(id, cycle.name, cycle.peak - cycle.baseline);
             } else if (floor !== null && rh <= floor) {
               showerCycles.delete(id);
-              ctx.log(
-                `Séchage ${cycle.name} arrêté à ${round1(rh)} % — l'air extérieur ne peut pas faire mieux (plancher ${round1(floor)} %)`,
+              because(
+                `Fin du séchage ${cycle.name} — bloqué à ${round1(rh)} %, l'air extérieur ne peut pas faire mieux (plancher ${round1(floor)} %)`,
               );
               recordAmplitude(id, cycle.name, cycle.peak - cycle.baseline);
             } else if (now - cycle.startedAt >= showerMaxRunMs) {
               showerCycles.delete(id);
-              ctx.log(
-                `Séchage ${cycle.name} arrêté — ${fmt(showerMaxRunMs)} sans revenir à ${round1(cycle.target)} % (encore ${round1(rh)} %)`,
-                "warn",
+              because(
+                `Fin du séchage ${cycle.name} — ${fmt(showerMaxRunMs)} de marche sans revenir à ${round1(cycle.target)} % (encore ${round1(rh)} %)`,
               );
               // Deliberately not folded in: a cycle that never came back says
               // nothing about the amplitude of a shower in that room, and
@@ -1584,13 +1620,13 @@ export function createRecipe(): RecipeDefinition {
           // including the no-data path below.
           setBlockedUntil(now + COOLDOWN_AFTER_MAX_RUN_MS);
           stopHumidityRun(
-            `durée maxi atteinte (${fmt(maxRunMs)}), repos ${fmt(COOLDOWN_AFTER_MAX_RUN_MS)}`,
+            `Durée maxi ${fmt(maxRunMs)} atteinte — repos forcé ${fmt(COOLDOWN_AFTER_MAX_RUN_MS)}`,
           );
           status = "cooldown";
           detail = "Durée maximale atteinte, repos forcé";
         } else if (fresh.length === 0) {
           if (running && now - runStartedAt >= minRunMs) {
-            stopHumidityRun("aucune mesure d'humidité fraîche");
+            stopHumidityRun("Aucune sonde ne remonte d'humidité récente");
           }
           status = "no_data";
           detail = "Aucune sonde ne remonte d'humidité récente";
@@ -1672,7 +1708,7 @@ export function createRecipe(): RecipeDefinition {
             // evaluating throughout: readings, occupancy and state stay live,
             // only the orders are withheld.
             if (quiet) {
-              stopHumidityRun("plage silencieuse");
+              stopHumidityRun(`Plage silencieuse (${quietText})`);
               status = "quiet";
               detail = "Plage silencieuse";
             } else if (elapsed < minRunMs) {
@@ -1682,8 +1718,8 @@ export function createRecipe(): RecipeDefinition {
             } else if (!hold) {
               stopHumidityRun(
                 blockedByOutdoor
-                  ? `air extérieur trop humide (plancher ${floorText} %)`
-                  : `humidité redescendue (max ${round1(worstHumidity)} % sur ${worstName})`,
+                  ? `Air extérieur trop humide — plancher ${floorText} %, plus rien à assécher`
+                  : `Humidité redescendue — ${worstName} ${round1(worstHumidity)} %, sous la cible ${humidityMin} %`,
               );
               status = "idle";
               detail = "Humidité sous la cible";
@@ -1698,7 +1734,11 @@ export function createRecipe(): RecipeDefinition {
             status = "cooldown";
             detail = "Repos après arrêt sur durée maximale";
           } else if (demand) {
-            startHumidityRun(`${worst} (max ${humidityMax} %)`);
+            startHumidityRun(
+              worstFloor === null
+                ? `Humidité ${worstName} ${round1(worstHumidity)} % au-dessus du maxi ${humidityMax} %`
+                : `Humidité ${worstName} ${round1(worstHumidity)} % au-dessus du maxi ${humidityMax} % — l'air extérieur permet de descendre à ${round1(worstFloor)} % (${round1(worstHumidity - worstFloor)} pts à gagner)`,
+            );
             status = "running";
             detail = `Extraction en cours — ${worst}`;
           } else if (blockedByOutdoor) {
@@ -1739,7 +1779,7 @@ export function createRecipe(): RecipeDefinition {
               // reached for the switch. Stand down, then resume normally.
               setBlockedUntil(now + MANUAL_OVERRIDE_BLOCK_MS);
               stopHumidityRun(
-                `VMC coupée en dehors de la recette — retrait ${fmt(MANUAL_OVERRIDE_BLOCK_MS)}`,
+                `VMC coupée à la main pendant le cycle — la recette se retire ${fmt(MANUAL_OVERRIDE_BLOCK_MS)}`,
               );
               status = "cooldown";
               detail = "VMC coupée manuellement";
@@ -1766,14 +1806,19 @@ export function createRecipe(): RecipeDefinition {
 
         // ══ Outputs ═══════════════════════════════════════════
         const extraction = running || motionRunning || showerRunning;
-        const why = showerRunning
-          ? showerDetail
-          : running
-            ? detail
-            : motionRunning
-              ? "occupation détectée"
-              : detail;
-        applyOutputs(extraction, highDemand || showerHigh, why);
+        // The journal gets ONE line per event: `VMC ON — <why>` when the
+        // ventilation moves, the causes on their own when it does not.
+        const why = causes.length > 0 ? causes.join(" · ") : detail;
+        const moved = applyOutputs(extraction, highDemand || showerHigh, why);
+        if (!moved) {
+          for (const cause of causes) {
+            // Still worth a line: a cycle ended or started without the
+            // ventilation changing state, because another one holds it.
+            ctx.log(
+              extraction ? `${cause} — la VMC continue de tourner` : `${cause} — VMC déjà à l'arrêt`,
+            );
+          }
+        }
 
         // ══ Silence is a promise, not a preference ════════════
         // The recipe stopping at 22:00 is not enough: anything else that
@@ -1891,7 +1936,7 @@ export function createRecipe(): RecipeDefinition {
       putState("showerRunning", showerCycles.size > 0);
 
       ctx.log(
-        `VMC hygro-pilotée démarrée (${rooms.length} pièce(s), max ${humidityMax} %, cible ${humidityMin} %` +
+        `VMC hygro-pilotée démarrée — ${rooms.map((r) => r.name).join(", ")} (maxi ${humidityMax} %, cible ${humidityMin} %` +
           (outdoorId ? `, compensation extérieure +${outdoorMargin} pts` : "") +
           (boostId ? ", 2 vitesses" : "") +
           (alwaysOn ? ", petite vitesse permanente" : "") +
@@ -1902,7 +1947,7 @@ export function createRecipe(): RecipeDefinition {
             ? `, détection douche (+${showerRisePts} pts d'eau ajoutée, seuil ajusté par pièce, séchage maxi ${fmt(showerMaxRunMs)})`
             : "") +
           (quietEnabled
-            ? `, silence ${String(params.quietStart ?? "22:00")}–${String(params.quietEnd ?? "07:00")}${quietScope === "humidity" ? " (humidité seulement)" : ""}`
+            ? `, silence ${quietText}${quietScope === "humidity" ? " (humidité seulement)" : ""}${showerEnabled ? ", qu'une douche outrepasse" : ""}`
             : "") +
           ")",
       );
@@ -1916,12 +1961,6 @@ export function createRecipe(): RecipeDefinition {
         ctx.log(
           `Détection de douche dégradée sur ${blind.join(", ")} : sans température, l'eau ajoutée ne peut pas être distinguée d'une pièce qui refroidit.`,
           "warn",
-        );
-      }
-
-      if (quietEnabled && showerEnabled) {
-        ctx.log(
-          "Plage silencieuse : une douche détectée démarrera quand même la VMC, le temps de faire redescendre l'humidité.",
         );
       }
 
