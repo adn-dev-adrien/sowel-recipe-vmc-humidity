@@ -624,6 +624,37 @@ describe("outdoor compensation", () => {
   });
 });
 
+describe("naming the room that decided", () => {
+  it("names the room that cleared the margin, not the wettest one", () => {
+    // 2026-08-26 07:00 on the live installation: the log read
+    // "60.9 % (plancher 59.5 %, gain 1.4 pts)" against a 5-point margin — the
+    // cool bathroom. The cycle was in fact justified by the warm laundry room,
+    // 59.6 % at 25.1 °C, whose floor sits twelve points lower.
+    const h = makeCtx({
+      rooms: [
+        { id: "room-1", name: "SDB", humidity: 60.9, temperature: 21.4 },
+        { id: "room-2", name: "Buanderie", humidity: 59.6, temperature: 25.1 },
+      ],
+      outdoor: { humidity: 71, temperature: 18.3 },
+    });
+    const inst = createRecipe().createInstance(
+      {
+        ...baseParams,
+        sensors: ["room-1", "room-2"],
+        humidityMax: 55,
+        outdoorSensor: "out-1",
+        outdoorMargin: 5,
+      },
+      h.ctx as never,
+    );
+    expect(vmcOrders(h.orders)).toEqual([true]);
+    const start = h.logs.find((l) => l.startsWith("VMC ON — Humidité"))!;
+    expect(start).toContain("Buanderie");
+    expect(start).not.toContain("SDB");
+    inst.stop();
+  });
+});
+
 describe("a bad reading must not remove the outdoor guard", () => {
   const params = { ...baseParams, outdoorSensor: "out-1", outdoorMargin: 3 };
 

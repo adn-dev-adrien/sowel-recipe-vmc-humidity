@@ -157,6 +157,13 @@ VMC OFF — Durée maxi 3h atteinte — repos forcé 1h
 VMC OFF — VMC coupée à la main pendant le cycle — la recette se retire 1h
 ```
 
+A humidity start names the room that **cleared the drying margin**, which is not
+always the wettest one: the outdoor floor is computed against each room's own
+temperature, so a warm laundry room at 59 % can have twelve points to gain while
+a cool bathroom at 61 % has barely two. Stop and status lines keep naming the
+wettest room — they are about what is left to dry, not about what started the
+cycle.
+
 Before, each of these was written twice: once by the cycle, once by the relay,
 with the same numbers in both. When a cycle ends without the ventilation
 stopping — because a visit or another room still holds it — the line says so
