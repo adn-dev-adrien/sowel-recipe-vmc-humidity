@@ -655,6 +655,87 @@ describe("naming the room that decided", () => {
   });
 });
 
+describe("two probes must not share a label", () => {
+  // The startup banner lists the rooms, so a duplicate label is visible
+  // immediately — and it used to read "Température (Température), Température":
+  // renaming while filtering on the names being renamed touched only the first
+  // twin, and with no zone the equipment name sat on both sides of the
+  // parenthesis.
+
+  // The room list is what the banner puts before its settings block.
+  const banner = (logs: string[]) =>
+    logs.find((l) => l.includes("démarrée"))!.split("démarrée — ")[1].split(" (maxi")[0];
+
+  it("tells apart two probes sharing a zone, both of them", () => {
+    const h = makeCtx({
+      rooms: [
+        { id: "room-1", name: "Douche", zoneName: "Salle de bain", humidity: 45, temperature: 21 },
+        { id: "room-2", name: "Lavabo", zoneName: "Salle de bain", humidity: 46, temperature: 21 },
+      ],
+    });
+    const inst = createRecipe().createInstance(
+      { ...baseParams, sensors: ["room-1", "room-2"] },
+      h.ctx as never,
+    );
+    const b = banner(h.logs);
+    expect(b).toContain("Salle de bain (Douche)");
+    expect(b).toContain("Salle de bain (Lavabo)");
+    inst.stop();
+  });
+
+  it("never builds a label out of one name twice", () => {
+    // No zone, and the Zigbee default name on both probes.
+    const h = makeCtx({
+      rooms: [
+        { id: "room-1", name: "Température", humidity: 45, temperature: 21 },
+        { id: "room-2", name: "Température", humidity: 46, temperature: 21 },
+      ],
+    });
+    const inst = createRecipe().createInstance(
+      { ...baseParams, sensors: ["room-1", "room-2"] },
+      h.ctx as never,
+    );
+    const b = banner(h.logs);
+    expect(b).not.toContain("Température (Température)");
+    expect(b).toContain("Température (room-1)");
+    expect(b).toContain("Température (room-2)");
+    inst.stop();
+  });
+
+  it("falls back to the id when a zone and a probe name are both shared", () => {
+    const h = makeCtx({
+      rooms: [
+        { id: "room-1", name: "Température", zoneName: "Salle de bain", humidity: 45, temperature: 21 },
+        { id: "room-2", name: "Température", zoneName: "Salle de bain", humidity: 46, temperature: 21 },
+      ],
+    });
+    const inst = createRecipe().createInstance(
+      { ...baseParams, sensors: ["room-1", "room-2"] },
+      h.ctx as never,
+    );
+    const b = banner(h.logs);
+    expect(b).toContain("Salle de bain (room-1)");
+    expect(b).toContain("Salle de bain (room-2)");
+    inst.stop();
+  });
+
+  it("leaves distinct rooms alone", () => {
+    const h = makeCtx({
+      rooms: [
+        { id: "room-1", name: "Température", zoneName: "Salle de bain", humidity: 45, temperature: 21 },
+        { id: "room-2", name: "Température", zoneName: "Buanderie", humidity: 46, temperature: 25 },
+      ],
+    });
+    const inst = createRecipe().createInstance(
+      { ...baseParams, sensors: ["room-1", "room-2"] },
+      h.ctx as never,
+    );
+    const b = banner(h.logs);
+    expect(b).toBe("Salle de bain, Buanderie");
+    inst.stop();
+  });
+});
+
 describe("a bad reading must not remove the outdoor guard", () => {
   const params = { ...baseParams, outdoorSensor: "out-1", outdoorMargin: 3 };
 

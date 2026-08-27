@@ -1002,14 +1002,32 @@ export function createRecipe(): RecipeDefinition {
         });
       }
 
-      // Two probes in one zone would otherwise share a label: fall back to the
-      // equipment name for both, which is at least distinct.
+      // Two probes can still land on one label — the same zone, or no zone at
+      // all and the Zigbee default name on both. Renaming in place while
+      // filtering on the names being renamed got this wrong twice over: the
+      // first twin was renamed, which hid the second from its own filter and
+      // left it untouched, and a probe with no zone had the equipment name on
+      // both sides of the parenthesis, so a pair read
+      // "Température (Température), Température".
+      //
+      // Decide once per group instead, and only with something that
+      // discriminates: the equipment names when they are all distinct and add
+      // anything to the label, the id prefix otherwise — the same prefix the
+      // "capteur introuvable" warnings above quote.
+      const byLabel = new Map<string, Room[]>();
       for (const r of rooms) {
-        const twins = rooms.filter((o) => o.name === r.name);
-        if (twins.length > 1) {
-          const eq = ctx.equipmentManager.getByIdWithDetails(r.id);
-          if (eq) r.name = `${r.name} (${eq.name})`;
-        }
+        const group = byLabel.get(r.name);
+        if (group) group.push(r);
+        else byLabel.set(r.name, [r]);
+      }
+      for (const [label, group] of byLabel) {
+        if (group.length < 2) continue;
+        const names = group.map((r) => ctx.equipmentManager.getByIdWithDetails(r.id)?.name ?? "");
+        const namesDiscriminate =
+          names.every((n) => n !== "" && n !== label) && new Set(names).size === group.length;
+        group.forEach((r, i) => {
+          r.name = namesDiscriminate ? `${label} (${names[i]})` : `${label} (${r.id.slice(0, 8)})`;
+        });
       }
 
       let outdoorHumidity = bindingValue(outdoorEq, outdoorHumAlias);

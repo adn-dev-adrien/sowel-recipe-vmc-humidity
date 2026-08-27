@@ -157,6 +157,11 @@ VMC OFF — Durée maxi 3h atteinte — repos forcé 1h
 VMC OFF — VMC coupée à la main pendant le cycle — la recette se retire 1h
 ```
 
+Two probes that would land on the same label — sharing a zone, or having no
+zone and the same name — are told apart by their equipment names when those
+differ, and by their id prefix when they do not. Whatever happens, no two rooms
+in one instance ever read alike.
+
 A humidity start names the room that **cleared the drying margin**, which is not
 always the wettest one: the outdoor floor is computed against each room's own
 temperature, so a warm laundry room at 59 % can have twelve points to gain while
